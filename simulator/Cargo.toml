@@ -7,6 +7,7 @@ description = "Symulator urządzenia — ten sam render co na panelu, myszka jak
 
 [dependencies]
 dashboard = { path = "../dashboard" }
+devlogic = { path = "../devlogic" }
 icalfeed = { path = "../icalfeed" }
 chrono = { version = "0.4", features = ["clock"] }
 chrono-tz = "0.10"

@@ -151,6 +151,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "devlogic"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dlib"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,6 +856,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dashboard",
+ "devlogic",
  "icalfeed",
  "minifb",
  "png",

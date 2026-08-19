@@ -26,7 +26,7 @@ const KEY_OTA_URL: &str = "ota_url";
 
 /// Maksymalna długość wartości tekstowej. Adresy iCal Google mają ~120 znaków;
 /// zapas jest na wypadek innych źródeł.
-const MAX_VALUE: usize = 512;
+pub const MAX_VALUE: usize = 512;
 
 pub struct Store {
     nvs: EspNvs<NvsDefault>,
@@ -78,7 +78,11 @@ impl Store {
     }
 
     fn get_string(&self, key: &str) -> Option<String> {
-        let mut buf = [0u8; MAX_VALUE];
+        // MAX_VALUE + 1, nie MAX_VALUE. `nvs_get_str` wymaga miejsca na kończące
+        // zero i przy buforze co do bajta zwraca ESP_ERR_NVS_INVALID_LENGTH —
+        // czyli wartość dokładnie maksymalnej długości dałaby się ZAPISAĆ,
+        // a przy odczycie zniknęłaby po cichu jako `None`.
+        let mut buf = [0u8; MAX_VALUE + 1];
         match self.nvs.get_str(key, &mut buf) {
             Ok(Some(s)) if !s.is_empty() => Some(s.to_string()),
             _ => None,
@@ -101,12 +105,37 @@ impl Store {
         }
     }
 
-    pub fn set_wifi(&mut self, ssid: &str, password: &str) -> Result<()> {
-        self.nvs.set_str(KEY_SSID, ssid).context("zapis SSID")?;
+    pub fn set_ssid(&mut self, ssid: &str) -> Result<()> {
+        self.nvs.set_str(KEY_SSID, ssid).context("zapis SSID")
+    }
+
+    pub fn set_password(&mut self, password: &str) -> Result<()> {
         self.nvs
             .set_str(KEY_PASSWORD, password)
-            .context("zapis hasła")?;
-        Ok(())
+            .context("zapis hasła")
+    }
+
+    /// Kasuje pojedyncze pole. `false` = nie ma takiego pola.
+    ///
+    /// Mapowanie nazwa -> klucz NVS siedzi tutaj, obok stałych, a nie w konsoli:
+    /// klucz NVS ma limit 15 znaków i bywa krótszy niż nazwa, którą wpisuje
+    /// człowiek, więc te dwie rzeczy muszą się rozjeżdżać w jednym miejscu.
+    pub fn clear(&mut self, field: &str) -> Result<bool> {
+        let key = match field.trim() {
+            "ssid" => KEY_SSID,
+            "pass" | "haslo" => KEY_PASSWORD,
+            "ics" => KEY_ICS_URL,
+            "ics2" => KEY_ICS_URL_2,
+            "tz" | "strefa" => KEY_TIMEZONE,
+            "interval" | "odstep" => KEY_INTERVAL,
+            "ota" => KEY_OTA_URL,
+            "rotation" | "obrot" => KEY_ROTATION,
+            _ => return Ok(false),
+        };
+        self.nvs
+            .remove(key)
+            .with_context(|| format!("kasowanie `{key}`"))?;
+        Ok(true)
     }
 
     pub fn set_ics_url(&mut self, url: &str) -> Result<()> {

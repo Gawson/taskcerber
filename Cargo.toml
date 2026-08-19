@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["dashboard", "icalfeed", "preview", "simulator"]
+members = ["dashboard", "devlogic", "icalfeed", "preview", "simulator"]
 # firmware/ jest osobnym workspace'em: jego .cargo/config.toml ustawia
 # [build] target = xtensa-... oraz build-std, a te ustawienia nie są per-target
 # i wymusiłyby cross-kompilację również na `preview`.

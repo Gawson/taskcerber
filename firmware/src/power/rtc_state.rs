@@ -186,37 +186,13 @@ impl RtcState {
     }
 }
 
-/// CRC32 (IEEE) — do wykrywania, czy treść kalendarza się zmieniła.
-///
-/// Własna implementacja tablicowa zamiast crate'a: to dwadzieścia linii, a każda
-/// zależność w tym buildzie kosztuje minuty kompilacji ESP-IDF.
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
+/// CRC32 mieszka w `devlogic`, żeby jego testy w ogóle się uruchamiały —
+/// `#[cfg(test)]` w tym crate'cie nigdy nie jest kompilowane.
+pub use devlogic::crc32;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn crc32_zgodne_z_referencja() {
-        assert_eq!(crc32(b""), 0x0000_0000);
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32(b"a"), 0xE8B7_BE43);
-    }
-
-    #[test]
-    fn crc_wykrywa_zmiane() {
-        assert_ne!(crc32(b"BEGIN:VEVENT"), crc32(b"BEGIN:VEVEN_"));
-    }
 
     #[test]
     fn wycofanie_rosnie_z_porazkami() {

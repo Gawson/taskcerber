@@ -386,6 +386,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "devlogic"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1396,6 +1405,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dashboard",
+ "devlogic",
  "embedded-svc",
  "embuild",
  "esp-idf-hal",

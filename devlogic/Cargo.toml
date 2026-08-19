@@ -1,0 +1,15 @@
+[package]
+name = "devlogic"
+version = "0.1.0"
+edition = "2021"
+description = "Logika urządzenia niezależna od ESP-IDF: polityka zasilania, decyzja OTA, maskowanie adresów"
+license = "MIT OR Apache-2.0"
+
+# ŻADNYCH ZALEŻNOŚCI OD ESP-IDF. Cały sens tego crate'a polega na tym, że kompiluje
+# się na hoście i jego testy chodzą w `cargo test` razem z resztą workspace'a.
+# Odpowiednik w `firmware/` byłby martwy: `firmware` jest osobnym workspace'em
+# celującym w Xtensę, więc `cargo test` nigdy tam nie uruchamia się na hoście.
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

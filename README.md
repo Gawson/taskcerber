@@ -8,6 +8,7 @@ z przeglądarki.
 ┌─────────────────────────────────────────────────────────────────┐
 │  dashboard/   render 960×540 Gray4 + model interakcji dotykowej  │  ← bez ESP-IDF
 │  icalfeed/    strumieniowy parser iCal + rozwijanie RRULE        │  ← bez ESP-IDF
+│  devlogic/    polityka zasilania, decyzja OTA, maskowanie adresów│  ← bez ESP-IDF
 ├─────────────────────────────────────────────────────────────────┤
 │  preview/     zrzuty PNG na hoście          simulator/  okno,    │
 │                                                mysz jako dotyk   │
@@ -28,7 +29,7 @@ zwykłym `cargo test` — zamiast być debugowane przez wgrywanie i patrzenie na
 Wszystko poniżej działa na zwykłym stabilnym Ruście, bez toolchainu Xtensa.
 
 ```bash
-cargo test                              # 92 testy: render, iCal, dotyk, paginacja
+cargo test                              # 101 testów: render, iCal, dotyk, paginacja, OTA
 cargo run -p preview -- all             # zrzuty PNG do out/ (pionowo)
 cargo run -p preview -- all landscape   # to samo poziomo, pliki z sufiksem
 cargo run -p simulator                  # interaktywne okno, mysz jako dotyk
@@ -135,6 +136,36 @@ Jeśli ostrzeżenie przeszkadza, są dwie drogi bez niego:
    na drugim komputerze, wpisany adres `http://192.168.1.152:8000`, restart
    przeglądarki. Wtedy wystarczy zwykłe `python3 -m http.server`.
 
+### Konfiguracja urządzenia
+
+Świeżo wgrane urządzenie nie ma ani danych WiFi, ani adresu kalendarza, i pokazuje
+ekran konfiguracji. Wpisuje się je **konsolą po USB** — tym samym kablem, którym
+się flashuje, bo płytka ma natywne USB-Serial-JTAG.
+
+Po wgraniu firmware'u kliknij na stronie flashera **Logs & Console** (albo odpal
+`espflash monitor`) i wpisz trzy polecenia:
+
+```
+ssid MojaSiec
+pass moje-haslo
+ics  https://calendar.google.com/calendar/ical/.../private-.../basic.ics
+```
+
+Zapis idzie prosto do NVS i działa **jeszcze w tym cyklu** — nie trzeba restartować.
+`?` pokazuje pełną listę, `show` bieżący stan (adresy zamaskowane), `done` zamyka
+konsolę i puszcza urządzenie dalej. Poza tym: `ics2` (drugi kanał), `ota` (manifest
+aktualizacji), `tz`, `interval`, `clear <pole>`.
+
+Wartością polecenia jest **cała reszta wiersza**, więc spacje w haśle i w nazwie
+sieci są w porządku; polskie znaki też.
+
+> **Konsola otwiera się tylko przy podłączonym hoście USB**, i to nie jest
+> oszczędność na wyrost. Urządzenie bez konfiguracji budzi się co pół godziny, więc
+> bezwarunkowe okno 90 s kosztowałoby ~2400 mAs na cykl — kilka razy więcej niż cały
+> udany cykl z siecią (~360 mAs). Pytamy o to `usb_serial_jtag_is_connected()`,
+> a nie ładowarkę: powerbank nie wysyła pakietów SOF i słusznie nie liczy się jako
+> host, a I²C do BQ25896 nie jest jeszcze zweryfikowane na tej płytce.
+
 ### Aktualizacja przez sieć (OTA)
 
 `./tools/build-image.sh` publikuje obok sklejki dla webflashera dwa dodatkowe pliki:
@@ -150,9 +181,10 @@ do slotu aplikacji, więc sklejka wylądowałaby tam razem z bootloaderem i tabl
 partycji. `tools/check-image.sh` sprawdza to jawnie — obraz OTA nie może mieć tablicy
 partycji na 0x8000.
 
-Włączenie na urządzeniu to wpisanie adresu manifestu do NVS (klucz `ota_url`).
-Bez niego OTA jest wyłączone i to jest **domyślne**: urządzenie na baterii nie
-powinno samo sięgać po nowy firmware, dopóki ktoś świadomie nie wskaże, skąd.
+Włączenie na urządzeniu to jedno polecenie w konsoli konfiguracyjnej:
+`ota https://twoj-host/ota.json` (klucz NVS `ota_url`). Bez niego OTA jest wyłączone
+i to jest **domyślne**: urządzenie na baterii nie powinno samo sięgać po nowy
+firmware, dopóki ktoś świadomie nie wskaże, skąd.
 
 Adres obrazu w manifeście jest **względny**, rozwiązywany względem adresu manifestu,
 więc ten sam artefakt działa z GitHub Pages i z serwera w LAN-ie bez przebudowy.
@@ -283,8 +315,9 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 | Boot i render na panelu | **uruchomione** — płytka wstaje, rysuje ekran konfiguracji |
 | Czyszczenie panelu, zatrzaski magistrali | **poprawione i sprawdzone na szkle** — obraz czysty po wybudzeniu |
 | Dwie orientacje | **napisane**, pion sprawdzony na szkle, poziom nie |
+| Konsola konfiguracyjna | **napisana, nieuruchomiona** — kompiluje się, czeka na kabel |
 | I²C, zasilanie, sieć, dotyk | **nieuruchomione** |
-| OTA | **napisane, nieuruchomione** — czeka na WiFi w NVS |
+| OTA | **napisane, nieuruchomione** — da się już włączyć konsolą |
 
 Największa niewiadoma projektu — czy `extra_components` w ogóle zbierze epdiy i czy
 nazwy z bindgena się zgodzą — **jest już rozwiązana**, a płytka wstaje i rysuje.

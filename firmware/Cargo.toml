@@ -42,6 +42,11 @@ dashboard = { path = "../dashboard" }
 # testowany na hoście — firmware nie ma własnej kopii tej logiki.
 icalfeed = { path = "../icalfeed" }
 
+# Logika, którą da się rozstrzygnąć bez sprzętu: maskowanie adresów, CRC treści,
+# polityka zasilania, decyzja OTA. Siedzi poza `firmware/`, bo testy jednostkowe
+# w tym crate'cie NIGDY się nie uruchamiają — to osobny workspace celujący w Xtensę.
+devlogic = { path = "../devlogic" }
+
 # --- Czas i strefy ---------------------------------------------------------
 # Parsowanie iCal i rozwijanie RRULE są w całości w `icalfeed`; tutaj chrono jest
 # potrzebne wprost do formatowania i do rozwiązania nazwy strefy z NVS.

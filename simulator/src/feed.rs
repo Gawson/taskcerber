@@ -74,41 +74,9 @@ fn group_by_day(events: Vec<dashboard::model::CalEvent>) -> Vec<DayGroup> {
     groups
 }
 
-/// Ukrywa tajny fragment prywatnego adresu iCal, żeby nie wylądował w logu ani
-/// na zrzucie ekranu.
-pub fn redact(url: &str) -> String {
-    match url.find("/private-") {
-        Some(i) => format!("{}/private-***", &url[..i]),
-        None => {
-            // Inne źródła: pokaż tylko host.
-            match url.split('/').nth(2) {
-                Some(host) => host.to_string(),
-                None => "(adres)".to_string(),
-            }
-        }
-    }
-}
+/// Maskowanie adresów mieszka w `devlogic`, bo ten sam kod ukrywa sekret
+/// w logu firmware'u (konsola konfiguracyjna) i tutaj, w pasku symulatora.
+pub use devlogic::redact;
 
 #[allow(dead_code)]
 fn _unused(_: NaiveDateTime) {}
-
-#[cfg(test)]
-mod tests {
-    use super::redact;
-
-    #[test]
-    fn ukrywa_tajny_fragment_adresu() {
-        let url = "https://calendar.google.com/calendar/ical/ktos%40gmail.com/private-abc123def/basic.ics";
-        let r = redact(url);
-        assert!(
-            !r.contains("abc123def"),
-            "tajny klucz nie może wyciec do logu: {r}"
-        );
-        assert!(r.contains("calendar.google.com"));
-    }
-
-    #[test]
-    fn inne_adresy_pokazuja_tylko_host() {
-        assert_eq!(redact("https://przyklad.pl/kalendarz.ics"), "przyklad.pl");
-    }
-}

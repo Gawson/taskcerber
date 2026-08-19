@@ -173,12 +173,7 @@ impl Epd {
     /// [`Refresh::Fast`] pomija czyszczenie i jest poprawne **wyłącznie jako drugie
     /// i kolejne rysowanie w obrębie tego samego wybudzenia** — dopiero wtedy `back_fb`
     /// naprawdę opisuje to, co jest na panelu.
-    pub fn present(
-        &mut self,
-        canvas: &Gray8,
-        mode: Refresh,
-        temperature_c: i32,
-    ) -> Result<()> {
+    pub fn present(&mut self, canvas: &Gray8, mode: Refresh, temperature_c: i32) -> Result<()> {
         self.power_on();
 
         if mode == Refresh::Full {
