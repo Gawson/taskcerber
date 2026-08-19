@@ -695,7 +695,6 @@ fn interactive_loop(
     let mut custom = Button::new(hw.expander.button_pressed().unwrap_or(false));
     let mut model = model.clone();
     let mut errors = 0u8;
-    let mut changed = false;
 
     info!("okno interaktywne: {IDLE_MS} ms");
     let mut deadline = Instant::now() + Duration::from_millis(IDLE_MS);
@@ -746,7 +745,13 @@ fn interactive_loop(
 
         match action {
             Action::OpenSetup => {
-                changed |= setup_screen(epd, touch, store, state, temperature_c, rotation);
+                if setup_screen(epd, touch, store, state, temperature_c, rotation) {
+                    // Po zapisie nie ma na co czekać: ekran pod spodem pokazuje stan
+                    // sprzed konfiguracji, a prawdziwa treść wymaga sięgnięcia po sieć,
+                    // czyli osobnego wybudzenia. Wychodzimy od razu, zamiast trzymać
+                    // urządzenie na jawie przez pełne okno bezczynności.
+                    return true;
+                }
                 screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Full);
             }
             Action::NextPage => {
@@ -778,7 +783,9 @@ fn interactive_loop(
         }
     }
 
-    changed
+    // Dotąd docieramy wyłącznie po wyczerpaniu okna bezczynności albo po awarii
+    // dotyku — czyli bez zapisanej konfiguracji.
+    false
 }
 
 /// Ekran konfiguracji: jedyna droga wprowadzania danych do urządzenia.
