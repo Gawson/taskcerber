@@ -76,9 +76,9 @@ jobs:
           path: |
             ~/.espressif
             ~/.rustup/toolchains/esp
-          key: espidf-${{ runner.os }}-v5.5.5-esp32s3-${{ hashFiles('firmware/sdkconfig.defaults', 'firmware/Cargo.toml') }}
+          key: espidf-${{ runner.os }}-v5.5.4-esp32s3-${{ hashFiles('firmware/sdkconfig.defaults', 'firmware/Cargo.toml') }}
           restore-keys: |
-            espidf-${{ runner.os }}-v5.5.5-esp32s3-
+            espidf-${{ runner.os }}-v5.5.4-esp32s3-
 
       - uses: Swatinem/rust-cache@v2
         with:
