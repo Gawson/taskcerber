@@ -395,6 +395,14 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 Największa niewiadoma projektu — czy `extra_components` w ogóle zbierze epdiy i czy
 nazwy z bindgena się zgodzą — **jest już rozwiązana**, a płytka wstaje i rysuje.
 
+**Bez miernika też jest co robić.** Firmware wypisuje przy zimnym starcie raport,
+który interpretuje skan I²C (nazwy układów zamiast adresów, `CISZA` przy brakujących),
+rozstrzyga sprzeczność PCF8563 vs PCF85063, sprawdza PSRAM i mierzy czas bootu.
+Osie dotyku ustawia się dotknięciem czterech rogów i odczytaniem logu. Zużycie energii
+liczy licznik kulombów BQ27220 — po kilku godzinach daje mAh/dobę, czyli odpowiedź
+na pytanie, które naprawdę boli. Szczegóły:
+[`docs/bringup.md`](docs/bringup.md#bez-miernika-samym-wgraniem).
+
 Zostało zachowanie reszty peryferiów. Zanim pójdziesz dalej, przeczytaj
 [`docs/bringup.md`](docs/bringup.md) — jest tam lista pomiarów z oczekiwanymi
 wartościami i opis czterech błędów, z których każdy kosztuje 10–200× budżetu energii.

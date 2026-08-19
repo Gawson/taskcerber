@@ -3,6 +3,89 @@
 Nikt wcześniej nie sterował epdiy z Rusta. Wyszukiwanie w GitHubie po `epdiy` daje
 same projekty w C i C++; po `epaper esp32 language:rust` — same panele SPI.
 
+## Bez miernika, samym wgraniem
+
+Większość pytań z tego dokumentu da się zamknąć mając wyłącznie płytkę, kabel
+i monitor szeregowy. Firmware sam wypisuje raport przy zimnym starcie
+(`firmware/src/diag.rs`), więc nie trzeba niczego interpretować z surowych liczb.
+
+```bash
+./tools/build-image.sh
+python3 -m http.server -d dist 8000     # wgraj z przeglądarki
+espflash monitor                        # albo „Logs & Console" na tej samej stronie
+```
+
+### Co powie pierwszy boot
+
+```
+=== raport bring-upu ===
+I2C: znaleziono 6 urządzeń
+  0x20  PCA9535   ekspander I/O
+  0x51  PCF8563   zegar RTC
+  0x55  BQ27220   licznik ogniwa
+  0x5D  GT911     dotyk
+  0x68  TPS65185  PMIC panelu
+  0x6B  BQ25896   ładowarka
+RTC: wariant Pcf8563
+RTC: flaga VL czysta, czas wygląda na ciągły
+PSRAM: 8388608 B — zgodnie z oczekiwaniem
+boot do gotowości: 312 ms
+=== koniec raportu ===
+```
+
+| Co widać | Co to znaczy |
+|---|---|
+| `CISZA` przy którymś adresie | ten układ nie odpowiada — albo magistrala, albo zasilanie sekcji |
+| `0x14  GT911 pod ADRESEM ZAPASOWYM` | sekwencja resetu ustawia `INT` odwrotnie; **dotyk i tak działa**, firmware sam się przełącza |
+| `RTC: wariant Pcf85063` | sprzeczność ze schematu rozstrzygnięta na niekorzyść sterownika — trzeba zmienić mapę rejestrów |
+| `RTC: flaga VL ustawiona` | bateryjka RTC pusta albo pierwszy start; czas przyjdzie z SNTP |
+| `PSRAM: 0 B` | octal PSRAM nie wstało; epdiy alokuje przez `assert()`, więc następny krok to abort |
+| `boot do gotowości > 600 ms` | pomiar 5: memtest PSRAM albo walidacja obrazu przy każdym wybudzeniu |
+| `boot #2` i dalej rosnące | pomiar 4: `.rtc.data` przeżywa deep sleep, linker nie wyciął sekcji |
+
+### Osie dotyku — jedyny sposób, żeby je ustawić
+
+Orientacja GT911 względem panelu jest w kodzie **założeniem**. Rozstrzyga się je
+w dwie minuty: dotknij czterech rogów ekranu i przeczytaj log.
+
+```
+dotyk: panel (12, 8) -> płótno (531, 12) -> Focus(Ssid)
+dotyk: panel (12, 8) -> płótno (531, 12), brak obszaru
+```
+
+Interesuje pierwsza para — to, co zwraca kontroler. Lewy górny róg **fizycznego**
+ekranu powinien dać coś bliskiego `(0, 0)`. Jeśli daje co innego, poprawka to trzy
+stałe w `firmware/src/board/gt911.rs`:
+
+| Lewy górny róg zwraca | Ustaw |
+|---|---|
+| ~(0, 0) | nic, jest dobrze |
+| ~(0, 540) | `FLIP_Y = true` |
+| ~(960, 0) | `FLIP_X = true` |
+| ~(960, 540) | `FLIP_X` i `FLIP_Y` |
+| `x` rośnie przy ruchu w **dół** ekranu | `SWAP_XY = true` (i sprawdź lustra jeszcze raz) |
+
+### Energia bez PPK2
+
+Licznik kulombów BQ27220 jest na płytce i firmware go czyta przy każdym wybudzeniu:
+
+```
+pomiar energii: linia bazowa 1187 mAh
+pomiar energii: 3 mAh przez 9,4 h  ->  7,7 mAh/dobę, średnio 319 µA
+```
+
+Rozdzielczość to 1 mAh, więc pojedyncze wybudzenie (0,08 mAh) jest poniżej szumu —
+ale po kilku godzinach średnia przestaje kłamać i **odpowiada na pomiary 10 i 11**
+z tabel niżej. Przy przekroczeniu progów firmware sam się odzywa ostrzeżeniem.
+Podłączenie ładowarki unieważnia linię bazową i pomiar zaczyna się od nowa, więc
+zostaw urządzenie na baterii.
+
+**Czego to nie zastąpi:** prądu chwilowego w deep sleepie (MCU śpi, nie ma kto
+czytać licznika), szczytów przy nadawaniu WiFi, różnicy z kartą SD i bez niej,
+i rozbicia zużycia na składniki. To zostaje dla PPK2 albo INA228.
+
+---
+
 ## Co jest już załatwione (2026-08-19)
 
 Część, która była największą niewiadomą, **jest sprawdzona**:

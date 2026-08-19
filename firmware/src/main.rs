@@ -25,6 +25,7 @@
 //!    uszkodzić panel.
 
 mod board;
+mod diag;
 mod epd;
 mod i2c;
 mod net;
@@ -119,19 +120,11 @@ fn run(mut state: RtcState) -> Result<u64> {
     let hw = Board::open(&bus).context("nie mogę otworzyć układów na płytce")?;
 
     if state.boot_count <= 1 {
-        // Skan magistrali tylko przy zimnym starcie — przy każdym wybudzeniu
-        // to zmarnowany czas z włączonym zasilaniem.
-        info!("urządzenia I2C: {:02X?}", bus.scan());
-        if let Ok((p0, p1)) = hw.expander.read_inputs() {
-            info!("ekspander PCA9535: port0={p0:#010b} port1={p1:#010b}");
-        }
-        info!("wariant RTC: {:?}", hw.rtc.probe_variant());
-        if let Ok(size) = psram_size() {
-            info!("PSRAM: {size} B");
-            if size != 8 * 1024 * 1024 {
-                warn!("PSRAM ma {size} B, oczekiwano 8388608 — sprawdź CONFIG_SPIRAM_MODE_OCT");
-            }
-        }
+        // Pełny raport tylko przy zimnym starcie: skan magistrali kosztuje ponad sto
+        // transakcji, a przy każdym wybudzeniu to zmarnowany czas z włączonym radiem
+        // peryferiów. Przy okazji jest to jedyne miejsce, w którym urządzenie mówi
+        // wprost, co widzi na płytce — patrz `diag`.
+        diag::cold_boot_report(&bus, &hw, uptime_ms());
     }
 
     // --- 2. Konfiguracja ------------------------------------------------------
@@ -155,6 +148,9 @@ fn run(mut state: RtcState) -> Result<u64> {
     });
     let fuel = hw.fuel.read();
     let temperature = hw.fuel.temperature_or_default();
+
+    // Zamiennik miernika: licznik kulombów BQ27220 uśredniony od linii bazowej.
+    diag::energy_line(&mut state, power_status, fuel, net::time::now_unix());
 
     let mut policy = Policy::default();
     if let Some(interval) = config.interval_s {
@@ -311,6 +307,11 @@ fn run(mut state: RtcState) -> Result<u64> {
                 screen,
                 temperature,
                 rotation,
+                if config.is_provisioned() {
+                    IDLE_MS
+                } else {
+                    FRESH_IDLE_MS
+                },
                 boot_count <= 1,
             );
             if changed {
@@ -590,6 +591,13 @@ fn woken_by_button() -> bool {
 /// Ile milisekund bez zdarzenia zamyka okno interaktywne agendy.
 const IDLE_MS: u64 = 20_000;
 
+/// To samo na urządzeniu bez konfiguracji.
+///
+/// Dwadzieścia sekund wystarczy komuś, kto wie, gdzie stuknąć. Po pierwszym wgraniu
+/// firmware'u trzeba jeszcze przeczytać ekran i zorientować się, że plakietka jest
+/// przyciskiem — a urządzenie bez konfiguracji i tak wisi wtedy na kablu.
+const FRESH_IDLE_MS: u64 = 60_000;
+
 /// To samo dla ekranu konfiguracji. Dłużej, bo wstukanie 120-znakowego adresu iCal
 /// to kilka minut, a przerwa na sprawdzenie hasła w telefonie jest normalna.
 const SETUP_IDLE_MS: u64 = 90_000;
@@ -686,6 +694,7 @@ fn interactive_loop(
     mut screen: dashboard::Screen,
     temperature_c: i32,
     mut rotation: Rotation,
+    window_ms: u64,
     verbose: bool,
 ) -> bool {
     use std::time::{Duration, Instant};
@@ -696,8 +705,8 @@ fn interactive_loop(
     let mut model = model.clone();
     let mut errors = 0u8;
 
-    info!("okno interaktywne: {IDLE_MS} ms");
-    let mut deadline = Instant::now() + Duration::from_millis(IDLE_MS);
+    info!("okno interaktywne: {window_ms} ms");
+    let mut deadline = Instant::now() + Duration::from_millis(window_ms);
 
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
@@ -709,7 +718,7 @@ fn interactive_loop(
                 warn!("nie mogę zapisać obrotu: {e:#}");
             }
             screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Full);
-            deadline = Instant::now() + Duration::from_millis(IDLE_MS);
+            deadline = Instant::now() + Duration::from_millis(window_ms);
             continue;
         }
 
@@ -736,12 +745,24 @@ fn interactive_loop(
         };
 
         // Dotyk przychodzi w układzie PANELU, obszary są w układzie płótna.
+        //
+        // Obie pary współrzędnych idą do logu i to jest celowe: dopóki orientacja osi
+        // GT911 jest założeniem, a nie pomiarem, dotknięcie czterech rogów i odczytanie
+        // tych linii jest jedynym sposobem, żeby ją ustawić. Patrz `SWAP_XY` w
+        // `board::gt911`.
         let (x, y) = rotation.panel_to_canvas(point.x, point.y);
         let Some(action) = screen.hit(x, y) else {
+            info!(
+                "dotyk: panel ({}, {}) -> płótno ({x}, {y}), brak obszaru",
+                point.x, point.y
+            );
             continue;
         };
-        info!("dotyk ({x}, {y}) -> {action:?}");
-        deadline = Instant::now() + Duration::from_millis(IDLE_MS);
+        info!(
+            "dotyk: panel ({}, {}) -> płótno ({x}, {y}) -> {action:?}",
+            point.x, point.y
+        );
+        deadline = Instant::now() + Duration::from_millis(window_ms);
 
         match action {
             Action::OpenSetup => {
@@ -846,6 +867,10 @@ fn setup_screen(
 
         let (x, y) = rotation.panel_to_canvas(point.x, point.y);
         let Some(action) = screen.hit(x, y) else {
+            info!(
+                "dotyk: panel ({}, {}) -> płótno ({x}, {y}), brak obszaru",
+                point.x, point.y
+            );
             continue;
         };
         deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
@@ -986,7 +1011,8 @@ impl Button {
     }
 }
 
-fn psram_size() -> Result<usize> {
-    // SAFETY: prosty getter z ESP-IDF.
-    Ok(unsafe { esp_idf_svc::sys::esp_psram_get_size() })
+/// Ile milisekund minęło od startu układu — pomiar 5 z `docs/bringup.md`.
+fn uptime_ms() -> u128 {
+    // SAFETY: prosty getter z ESP-IDF, zwraca mikrosekundy od bootu.
+    (unsafe { esp_idf_svc::sys::esp_timer_get_time() } as u128) / 1000
 }

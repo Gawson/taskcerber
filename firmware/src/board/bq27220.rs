@@ -16,6 +16,7 @@ pub const ADDRESS: u8 = 0x55;
 const REG_TEMPERATURE: u8 = 0x06; // 0.1 K
 const REG_VOLTAGE: u8 = 0x08; // mV
 const REG_CURRENT: u8 = 0x0C; // mA, ze znakiem
+const REG_REMAINING: u8 = 0x10; // mAh
 const REG_STATE_OF_CHARGE: u8 = 0x2C; // %
 
 pub struct Bq27220 {
@@ -29,6 +30,8 @@ pub struct Fuel {
     /// Prąd w mA; dodatni = ładowanie.
     pub milliamps: Option<i16>,
     pub temperature_c: Option<i16>,
+    /// Pozostała pojemność w mAh — licznik kulombów, zamiennik miernika.
+    pub remaining_mah: Option<u16>,
 }
 
 impl Bq27220 {
@@ -54,6 +57,7 @@ impl Bq27220 {
                 .read_u16_le(REG_TEMPERATURE)
                 .ok()
                 .map(decikelvin_to_celsius),
+            remaining_mah: self.dev.read_u16_le(REG_REMAINING).ok(),
         }
     }
 

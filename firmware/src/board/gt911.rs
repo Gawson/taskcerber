@@ -32,7 +32,7 @@
 //! **Nic z tego nie było uruchomione na sprzęcie.** Szczególnie orientacja osi
 //! względem panelu jest założeniem, nie pomiarem — patrz [`Gt911::read`].
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use esp_idf_svc::sys;
 use log::{info, warn};
 
@@ -40,6 +40,14 @@ use crate::i2c::{I2cBus, I2cDevice};
 
 /// Adres po sekwencji resetu z `INT` w dole.
 const ADDRESS: u8 = 0x5D;
+
+/// Adres, na którym kontroler ląduje, gdy `INT` był w GÓRZE przy zwolnieniu `RST`.
+///
+/// Próbujemy go po `0x5D` nie z ostrożności, tylko dlatego, że polaryzacja `INT`
+/// w tej sekwencji jest jedyną rzeczą, której nie da się sprawdzić inaczej niż na
+/// sztuce. Jeśli układ odezwie się tutaj, urządzenie **działa** i jednocześnie mówi
+/// w logu, co poprawić.
+const ADDRESS_ALT: u8 = 0x14;
 
 /// Reset kontrolera dotyku.
 pub const RST: i32 = 9;
@@ -55,6 +63,26 @@ const REG_POINT1: u16 = 0x8150;
 
 const STATUS_READY: u8 = 0x80;
 const STATUS_COUNT: u8 = 0x0F;
+
+// ---------------------------------------------------------------------------
+// Osie kontrolera względem panelu — ZAŁOŻENIE, NIE POMIAR
+// ---------------------------------------------------------------------------
+// Zakładamy, że GT911 raportuje w tym samym układzie, w którym panel skanuje:
+// `x` wzdłuż 960 pikseli, `y` wzdłuż 540. Oba układy są przylepione do tego samego
+// szkła, więc jest to najbardziej prawdopodobne — ale nie zostało sprawdzone.
+//
+// Poprawka po pierwszym uruchomieniu sprowadza się do przestawienia tych trzech
+// stałych i nie wymaga ruszania niczego poza tym plikiem. `interactive_loop` wypisuje
+// przy każdym dotknięciu surowe współrzędne panelu obok przeliczonych na płótno,
+// więc dotknięcie czterech rogów wystarczy, żeby je ustawić:
+//
+//   lewy górny róg zwraca ~(0, 0)          -> wszystko false, tak jak teraz
+//   lewy górny róg zwraca ~(0, 540)        -> FLIP_Y
+//   lewy górny róg zwraca ~(960, 0)        -> FLIP_X
+//   x rośnie przy ruchu w dół ekranu       -> SWAP_XY
+const SWAP_XY: bool = false;
+const FLIP_X: bool = false;
+const FLIP_Y: bool = false;
 
 /// Co kontroler ma do powiedzenia.
 ///
@@ -93,23 +121,36 @@ impl Gt911 {
     pub fn new(bus: &I2cBus) -> Result<Self> {
         reset_sequence();
 
-        let dev = bus
-            .device(ADDRESS)
-            .context("nie mogę dołączyć GT911 do magistrali")?;
-        let touch = Self { dev };
-
+        // Najpierw adres, o który prosiliśmy sekwencją resetu; potem zapasowy.
         // Identyfikator jest jedynym sposobem odróżnienia „układ odpowiada" od
-        // „adres jest zajęty przez coś innego". Przy nieudanej sekwencji resetu
-        // GT911 siedzi pod 0x14 i pod 0x5D nie ma nikogo.
-        let id = touch.product_id().context("GT911 nie odpowiada pod 0x5D")?;
-        if &id[..3] != b"911" {
-            bail!(
-                "pod 0x5D odpowiada coś, co przedstawia się jako {:?}, a nie 911",
-                String::from_utf8_lossy(&id)
-            );
+        // „pod tym adresem siedzi coś innego".
+        for address in [ADDRESS, ADDRESS_ALT] {
+            let Ok(dev) = bus.device(address) else {
+                continue;
+            };
+            let touch = Self { dev };
+            let Ok(id) = touch.product_id() else {
+                continue;
+            };
+            if &id[..3] != b"911" {
+                warn!(
+                    "pod 0x{address:02X} odpowiada coś, co przedstawia się jako {:?}",
+                    String::from_utf8_lossy(&id)
+                );
+                continue;
+            }
+
+            if address == ADDRESS_ALT {
+                warn!(
+                    "GT911 odpowiada pod adresem zapasowym 0x{ADDRESS_ALT:02X} — sekwencja \
+                     resetu ustawia INT odwrotnie, niż zakłada. Dotyk działa, ale warto \
+                     to poprawić w board::gt911::reset_sequence"
+                );
+            }
+            return Ok(touch);
         }
 
-        Ok(touch)
+        bail!("GT911 nie odpowiada ani pod 0x{ADDRESS:02X}, ani pod 0x{ADDRESS_ALT:02X}")
     }
 
     /// Cztery bajty identyfikatora produktu.
@@ -146,11 +187,11 @@ impl Gt911 {
         } else {
             let mut raw = [0u8; 8];
             self.read_at(REG_POINT1, &mut raw)?;
-            Report::Down(TouchPoint {
-                // Bajt 0 to identyfikator śledzenia, współrzędne zaczynają się od 1.
-                x: u16::from_le_bytes([raw[1], raw[2]]) as i32,
-                y: u16::from_le_bytes([raw[3], raw[4]]) as i32,
-            })
+            // Bajt 0 to identyfikator śledzenia, współrzędne zaczynają się od 1.
+            Report::Down(orient(
+                u16::from_le_bytes([raw[1], raw[2]]) as i32,
+                u16::from_le_bytes([raw[3], raw[4]]) as i32,
+            ))
         };
 
         // Flagę trzeba skasować, inaczej kontroler nie zgłosi kolejnego dotknięcia.
@@ -200,6 +241,18 @@ fn reset_sequence() {
         sys::gpio_set_pull_mode(INT, sys::gpio_pull_mode_t_GPIO_FLOATING);
         delay_ms(60);
     }
+}
+
+/// Sprowadza współrzędne kontrolera do układu panelu — patrz `SWAP_XY` i spółka.
+fn orient(x: i32, y: i32) -> TouchPoint {
+    let (mut x, mut y) = if SWAP_XY { (y, x) } else { (x, y) };
+    if FLIP_X {
+        x = dashboard::PANEL_WIDTH as i32 - 1 - x;
+    }
+    if FLIP_Y {
+        y = dashboard::PANEL_HEIGHT as i32 - 1 - y;
+    }
+    TouchPoint { x, y }
 }
 
 fn delay_ms(ms: u32) {

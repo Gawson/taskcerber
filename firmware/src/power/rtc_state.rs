@@ -21,7 +21,7 @@ use log::info;
 
 // Bump przy KAŻDEJ zmianie układu `RtcState`. Stary stan w pamięci RTC ma inny
 // rozmiar i przesunięcia pól; bez zmiany magii zostałby odczytany jako śmieci.
-const MAGIC: u32 = 0x5435_5F34; // "T5_4"
+const MAGIC: u32 = 0x5435_5F35; // "T5_5"
 
 /// Ile razy z rzędu sieć musi zawieść, zanim wydłużymy odstępy.
 pub const FAILURES_BEFORE_BACKOFF: u8 = 3;
@@ -50,6 +50,10 @@ pub struct RtcState {
     pub last_success_unix: i64,
     /// Użytkownik dotknął „odśwież". Patrz [`RtcState::request_fetch`].
     pub fetch_requested: bool,
+    /// Czas, od którego liczymy zużycie energii (unix), 0 = brak linii bazowej.
+    pub energy_start_unix: i64,
+    /// Pozostała pojemność w chwili założenia linii bazowej, mAh.
+    pub energy_start_mah: u16,
 }
 
 // Licznika prób OTA tutaj NIE MA i to jest świadome. Bootloader przeładowuje
@@ -73,6 +77,8 @@ static mut RTC_STATE: RtcState = RtcState {
     ap_bssid: [0; 6],
     last_success_unix: 0,
     fetch_requested: false,
+    energy_start_unix: 0,
+    energy_start_mah: 0,
 };
 
 impl RtcState {
@@ -96,6 +102,8 @@ impl RtcState {
                 ap_bssid: [0; 6],
                 last_success_unix: 0,
                 fetch_requested: false,
+                energy_start_unix: 0,
+                energy_start_mah: 0,
             };
         }
 
