@@ -1,0 +1,6 @@
+# Xtensa wymaga forka kompilatora od Espressif — upstream Rust nie ma tego targetu,
+# a kanał `nightly` obsługuje tylko RISC-V.
+#   espup install --std --targets esp32s3 --export-file "$HOME/export-esp.sh"
+#   . "$HOME/export-esp.sh"
+[toolchain]
+channel = "esp"

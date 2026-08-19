@@ -1,0 +1,17 @@
+[package]
+name = "simulator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Symulator urządzenia — ten sam render co na panelu, myszka jako dotyk"
+
+[dependencies]
+dashboard = { path = "../dashboard" }
+icalfeed = { path = "../icalfeed" }
+chrono = { version = "0.4", features = ["clock"] }
+chrono-tz = "0.10"
+# Okno + bufor pikseli + mysz. Najmniejsza rzecz, która robi dokładnie to, czego trzeba.
+minifb = "0.28"
+png = "0.18"
+# Pobieranie prawdziwego kanału iCal do testów integracji.
+ureq = { version = "3", default-features = false, features = ["rustls"] }

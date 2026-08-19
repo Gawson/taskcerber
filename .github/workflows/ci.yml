@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Szybka bramka: cała logika, która nie potrzebuje ESP-IDF.
+  # Renderowanie, parsowanie iCal i model interakcji są testowane tutaj, na hoście,
+  # w kilkanaście sekund — zamiast czekać na build ESP-IDF liczony w minutach.
+  host:
+    name: Testy na hoście
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatowanie
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Testy
+        run: cargo test --workspace
+
+      - name: Podgląd renderuje się bez paniki
+        run: cargo run --release -p preview -- all
+
+      - name: Zrzuty podglądu jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: podglad
+          path: out/*.png
+          if-no-files-found: error
+
+  firmware:
+    name: Firmware (ESP32-S3)
+    runs-on: ubuntu-latest
+    needs: host
+    env:
+      # espup odpytuje API GitHuba; bez tokenu regularnie trafia w limit zapytań.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.7
+        with:
+          default: true
+          override: false        # firmware/rust-toolchain.toml sam wskazuje kanał `esp`
+          buildtargets: esp32s3
+          ldproxy: true          # ścieżka std WYMAGA ldproxy
+
+      # Cache narzędzi ESP-IDF to największa oszczędność w tym builcie:
+      # bez niego każdy przebieg pobiera ~1,2 GB i klonuje esp-idf od nowa,
+      # co daje 35–60 minut zamiast kilku.
+      - name: Cache narzędzi ESP-IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/.rustup/toolchains/esp
+          key: espidf-${{ runner.os }}-v5.5.5-esp32s3-${{ hashFiles('firmware/sdkconfig.defaults', 'firmware/Cargo.toml') }}
+          restore-keys: |
+            espidf-${{ runner.os }}-v5.5.5-esp32s3-
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: firmware
+          key: xtensa-esp32s3-espidf
+
+      - name: Build firmware
+        working-directory: firmware
+        run: cargo build --release
+
+      - name: espflash
+        run: cargo install espflash --version 4.5.0 --locked
+
+      # build-image.sh sam woła na końcu tools/check-image.sh, który weryfikuje
+      # strukturę obrazu (offsety, tryb flasha, właściwy bootloader, brak
+      # dopychania) oraz skanuje go pod kątem wyciekniętych sekretów.
+      - name: Obraz dla webflashera
+        run: ./tools/build-image.sh
+
+      - name: Artefakt firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: dist/
+          if-no-files-found: error
+
+  pages:
+    name: Publikacja webflashera
+    runs-on: ubuntu-latest
+    needs: firmware
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: dist
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

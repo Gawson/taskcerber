@@ -1,0 +1,23 @@
+dependencies:
+  idf:
+    source:
+      type: idf
+    version: 5.5.4
+  vroland/epdiy:
+    component_hash: e1d2d958a080c6120ce3d5d70a5ad5c79277f1817433bb8b7a5876d9f606536c
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32s3
+    version: 2.1.3
+direct_dependencies:
+- vroland/epdiy
+manifest_hash: 0c5f272000efe494e00c2e91dceefebae4161f458b664bdbdafebb080d215539
+target: esp32s3
+version: 2.0.0

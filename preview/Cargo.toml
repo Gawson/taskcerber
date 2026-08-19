@@ -1,0 +1,12 @@
+[package]
+name = "preview"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Podgląd dashboardu na hoście — renderuje ten sam kod co firmware do PNG"
+
+[dependencies]
+dashboard = { path = "../dashboard" }
+chrono = { version = "0.4", default-features = false, features = ["alloc", "clock"] }
+# Enkoder PNG żyje wyłącznie tutaj i nigdy nie trafia do firmware'u.
+png = "0.18"

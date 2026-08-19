@@ -1,0 +1,4 @@
+# Workspace hosta (dashboard + preview) buduje się na zwykłym stabilnym Ruście.
+# Firmware ma własny rust-toolchain.toml z channel = "esp".
+[toolchain]
+channel = "stable"

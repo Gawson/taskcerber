@@ -1,0 +1,10 @@
+/target
+/dist
+**/*.rs.bk
+*.pdb
+.DS_Store
+/.env
+/secrets.toml
+/.flasher-tls
+/out
+.claude/settings.local.json

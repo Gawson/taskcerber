@@ -1,0 +1,15 @@
+[package]
+name = "dashboard"
+version = "0.1.0"
+edition = "2021"
+description = "Renderowanie dashboardu dla panelu e-papierowego ED047TC1 960x540 Gray4"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Rasteryzacja glifów z antyaliasingiem. ~4 KB RAM na krój i leniwe parsowanie —
+# w przeciwieństwie do fontdue, które dekoduje wszystkie glify przy ładowaniu.
+ab_glyph = { version = "0.2.32", default-features = false, features = ["std"] }
+
+# Arytmetyka kalendarzowa. Bez feature'u "clock": na urządzeniu nie ma zegara
+# systemowego, czas przychodzi z RTC/SNTP jako NaiveDateTime.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }

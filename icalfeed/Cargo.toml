@@ -1,0 +1,16 @@
+[package]
+name = "icalfeed"
+version = "0.1.0"
+edition = "2021"
+description = "Strumieniowy parser iCal + rozwijanie RRULE, dla urządzeń o ograniczonej pamięci"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+dashboard = { path = "../dashboard" }
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+chrono-tz = { version = "0.10", default-features = false }
+rrule = "0.14"
+log = "0.4"
+
+[dev-dependencies]
+chrono = { version = "0.4", features = ["clock"] }

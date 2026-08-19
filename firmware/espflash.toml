@@ -1,0 +1,5 @@
+# Wygoda dla `cargo run`. Kanoniczna jest jawna komenda z tools/build-image.sh —
+# jeśli espflash zignoruje ten plik, dostaniesz jego wbudowaną tablicę partycji
+# (factory ograniczone do 1 MB na S3) i build padnie na ElfTooBig.
+[idf]
+partition_table = "partitions.csv"

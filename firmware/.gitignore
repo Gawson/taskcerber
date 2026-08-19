@@ -1,0 +1,7 @@
+/target
+/.embuild
+# To nie literówka. esp-idf-sys składa łańcuch defaultów jako
+#   [OUT_DIR/gen-sdkconfig.defaults, sdkconfig.defaults, <workspace>/sdkconfig]
+# i ten ostatni ma najwyższy priorytet. Zabłąkany sdkconfig po cichu nadpisze wszystko.
+sdkconfig
+sdkconfig.old

@@ -1,0 +1,121 @@
+[package]
+name = "t5s3pro"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+description = "Kalendarzowy dashboard e-papierowy na LilyGo T5 E-Paper S3 Pro"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "t5s3pro"
+harness = false          # na targecie nie ma libtest
+
+[dependencies]
+# --- ESP-IDF ---------------------------------------------------------------
+# esp-idf-svc reeksportuje hal jako ::hal i sys jako ::sys; pozostałe dwa są
+# przypięte jawnie tylko po to, żeby w Cargo.lock wylądowały zweryfikowane wersje.
+esp-idf-svc = "0.52.1"   # wifi, klient HTTP, sntp, nvs, pętla zdarzeń, TLS
+esp-idf-hal = "0.46.2"   # task::watchdog, sleep::DeepSleep, reset::ResetReason
+esp-idf-sys = "0.37.2"   # surowe FFI: i2c_master_*, symbole epdiy, gpio_hold_en
+embedded-svc = "0.29"    # traity Http Client/Headers/Status, które implementuje esp-idf-svc
+
+# Musi się zgadzać z `[dependencies.heapless] version = "0.9"` z esp-idf-svc:
+# ClientConfiguration.ssid to heapless::String<32>, a rozjazd wersji daje dwa
+# niekompatybilne typy o tej samej nazwie.
+heapless = "0.9"
+
+log = "0.4"
+anyhow = "1"
+
+# Manifest OTA. Oba crate'y są już w drzewie zależności esp-idf-svc, więc nie
+# dokładają nowego kroku kompilacji — tylko kod do obrazu, i to na tyle mało,
+# że przy 71% zajętości slotu nie ma o czym mówić.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- Renderowanie ----------------------------------------------------------
+# Ten sam crate kompiluje się na hoście (preview) i na targecie. Bez cfg-forków.
+dashboard = { path = "../dashboard" }
+
+# Parsowanie kanału iCal i rozwijanie reguł powtarzania. Ten sam crate, który jest
+# testowany na hoście — firmware nie ma własnej kopii tej logiki.
+icalfeed = { path = "../icalfeed" }
+
+# --- Czas i strefy ---------------------------------------------------------
+# Parsowanie iCal i rozwijanie RRULE są w całości w `icalfeed`; tutaj chrono jest
+# potrzebne wprost do formatowania i do rozwiązania nazwy strefy z NVS.
+chrono = "0.4"
+chrono-tz = "0.10"
+
+[build-dependencies]
+embuild = "0.33"
+
+# Makro `esp_app_desc!` z esp-idf-sys rozwija się do cfg-ów ustawianych przez jego
+# build script (`esp_idf_version_at_least_*`, `esp_idf_app_compile_time_date`, ...).
+# rustc ich nie zna w crate'cie docelowym i sypie kilkunastoma ostrzeżeniami na jedno
+# wywołanie makra, zagłuszając te ostrzeżenia, które faktycznie coś znaczą.
+# To hałas z upstreamu, nie nasz problem.
+[lints.rust]
+unexpected_cfgs = "allow"
+
+# ---------------------------------------------------------------------------
+# Konfiguracja esp-idf-sys. JEDYNE ŹRÓDŁO PRAWDY dla wersji IDF —
+# nie ustawiaj ESP_IDF_VERSION równolegle w .cargo/config.toml [env].
+# ---------------------------------------------------------------------------
+[package.metadata.esp-idf-sys]
+# NIE podnosić do v5.5.5 bez sprawdzenia esp-idf-hal.
+#
+# W v5.5.5 struktura `sdmmc_host_t` dostała pole `unaligned_multi_block_rw_max_chunk_size`
+# (`components/sdmmc/include/sd_protocol_types.h`), a `esp-idf-hal` 0.46.2 — czyli
+# najnowsza wydana — inicjalizuje tę strukturę wyliczając pola i nie kompiluje się:
+#
+#   error[E0063]: missing field `unaligned_multi_block_rw_max_chunk_size`
+#     --> esp-idf-hal-0.46.2/src/sd.rs:244
+#
+# Moduł `sd` w esp-idf-hal nie jest za feature'em, więc nie da się go wyłączyć.
+# v5.5.4 to najnowsza wersja bez tego pola, a `esp_driver_i2c` (wymagane przez epdiy)
+# jest w niej obecne. Sprawdzone 2026-08-19.
+esp_idf_version = "v5.5.4"
+esp_idf_tools_install_dir = "global"      # ~/.espressif; przeżywa `cargo clean`
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+
+# epdiy 2.1.3 z rejestru komponentów Espressif. Bez submodułu, bez forka.
+# Profil płytki `lilygo_board_s3` ma pinout zgodny ze schematem co do nogi,
+# a `ED047TC1` jest w displays.c z własnym waveformem.
+#
+# `bindings_module` jest CELOWO POMINIĘTY. Z nim bindgen odpala drugą instancję
+# i generuje nominalnie różne `i2c_master_bus_handle_t`, `esp_err_t`, `gpio_num_t`.
+# Ponieważ podajemy epdiy uchwyt magistrali I2C stworzony po stronie Rusta, te typy
+# muszą być tożsame. Pominięcie pola scala symbole epdiy do korzenia esp_idf_sys.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "vroland/epdiy", version = "2.1.3" }
+bindings_header = "src/epdiy_bindings.h"
+
+# ---------------------------------------------------------------------------
+[profile.release]
+# "s", nie "z": na Xtensie "z" często daje WIĘKSZY kod. To też przestawia
+# generowany gen-sdkconfig.defaults na CONFIG_COMPILER_OPTIMIZATION_SIZE dla
+# ~2900 obiektów C, co jest największą pojedynczą dźwignią rozmiaru.
+opt-level = "s"
+# "fat" i tak nie przechodzi przez granicę C (archiwa .a z GCC, brak wspólnego IR).
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = false
+# MUSI zostać false: espflash zgłasza AppDescriptorNotPresent, jeśli
+# esp_app_desc / .rodata_desc / .flash.appdesc zostaną wycięte.
+strip = false
+incremental = false
+overflow-checks = false
+
+# Rasteryzacja to gorąca ścieżka, a panel i tak odświeża się ~1 s.
+# -Os akurat tutaj jest złym kompromisem.
+[profile.release.package.dashboard]
+opt-level = 3
+[profile.release.package.ab_glyph]
+opt-level = 3
+
+[profile.dev]
+opt-level = "z"
+debug = true

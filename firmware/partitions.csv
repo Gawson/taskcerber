@@ -1,0 +1,16 @@
+# ESP32-S3, 16 MB. Tablica leży pod 0x8000. Buduje ją espflash, nie ESP-IDF.
+#
+# UKŁAD JEST PODYKTOWANY PRZEZ WEBFLASHER:
+#   espflash --merge zapisuje [bootloader@0x0][luka 0xFF][tablica@0x8000][luka 0xFF][app@ota_0]
+#   i te luki 0xFF SĄ ZAPISYWANE. Czyli wszystko między 0x9000 a 0x10000 jest kasowane
+#   przy każdym przeflashowaniu z przeglądarki, a wszystko za aplikacją zostaje nietknięte.
+#     -> otadata pod 0x9000 (w luce): kasowane przy reflashu, bootloader wraca do ota_0.
+#     -> nvs ZA obiema partycjami aplikacji: dane WiFi i URL kalendarza przeżywają reflash.
+#
+# Name,     Type, SubType,  Offset,    Size,      Flags
+otadata,    data, ota,      0x009000,  0x2000,
+phy_init,   data, phy,      0x00B000,  0x1000,
+ota_0,      app,  ota_0,    0x010000,  0x400000,
+ota_1,      app,  ota_1,    0x410000,  0x400000,
+nvs,        data, nvs,      0x810000,  0x020000,
+storage,    data, fat,      0x830000,  0x7D0000,

@@ -1,0 +1,16 @@
+[build]
+target = "xtensa-esp32s3-espidf"
+
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+runner = "espflash flash --monitor"
+# Obowiązkowe dla ESP-IDF >= 5.0: mówi crate'owi libc, że time_t jest 64-bitowy.
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32s3"
+# ESP_IDF_VERSION i ESP_IDF_TOOLS_INSTALL_DIR celowo NIE są tu ustawione —
+# jedynym źródłem prawdy jest [package.metadata.esp-idf-sys] w Cargo.toml.

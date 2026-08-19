@@ -1,0 +1,156 @@
+#==============================================================================
+# LilyGo T5 E-Paper S3 Pro — ESP32-S3-WROOM-1-N16R8 (16 MB QIO flash, 8 MB OPI PSRAM)
+# TYLKO DEEP SLEEP. Żadnego light sleepa na ścieżce bateryjnej — patrz docs/power.md.
+#==============================================================================
+
+#--- Target / flash ------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_OCT_FLASH=n
+CONFIG_ESPTOOLPY_FLASH_MODE_AUTO_DETECT=n
+
+#--- Tablica partycji ----------------------------------------------------------
+# Zostawiona na domyślnej ESP-IDF CELOWO. CONFIG_PARTITION_TABLE_CUSTOM_FILENAME jest
+# rozwiązywane względem katalogu projektu CMake, który esp-idf-sys generuje w OUT_DIR,
+# a NIE względem katalogu crate'a. Prawdziwą tablicę buduje espflash z ./partitions.csv.
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_PARTITION_TABLE_MD5=y
+
+#--- PSRAM OCTAL ---------------------------------------------------------------
+# 80 MHz, nie 120 jak w platformio.ini vendora: na S3 octal tryb 120 MHz zależy od
+# SPIRAM_MODE_QUAD albo IDF_EXPERIMENTAL_FEATURES, a Kconfig ostrzega przed padami
+# przy wahaniach ~20 °C. To urządzenie na baterii, wiszące na ścianie.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+# Memtest kosztuje ~100 ms przy każdym wybudzeniu. WŁĄCZ na czas bring-upu (M1/M2).
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_SPIRAM_ECC_ENABLE=n
+CONFIG_SPIRAM_USE_MALLOC=y
+# Alokacje >4 KB idą do PSRAM — to uwalnia wewnętrzny DRAM na bufory mbedTLS.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# epdiy kompiluje lut.c z -mno-fix-esp32-psram-cache-issue; wykonywanie kodu z PSRAM
+# zmienia zachowanie cache'u pod jego gorącą pętlą DMA.
+CONFIG_SPIRAM_FETCH_INSTRUCTIONS=n
+CONFIG_SPIRAM_RODATA=n
+
+#--- CPU: race to sleep --------------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+#--- Sen: wyłącznie głęboki ----------------------------------------------------
+CONFIG_PM_ENABLE=n
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=n
+CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP=y
+CONFIG_ESP_SLEEP_GPIO_RESET_WORKAROUND=y
+# Po ~10 µA każdy, WYMAGANE na modułach WROOM.
+CONFIG_ESP_SLEEP_FLASH_LEAKAGE_WORKAROUND=y
+CONFIG_ESP_SLEEP_PSRAM_LEAKAGE_WORKAROUND=y
+CONFIG_ESP_SLEEP_MSPI_NEED_ALL_IO_PU=y
+# CONFIG_ESP_SLEEP_POWER_DOWN_FLASH jest NIEWYBIERALNE na S3 z SPIRAM — jego Kconfig to
+#   depends on !SPIRAM || ESP_LDO_RESERVE_PSRAM || SOC_PSRAM_HAS_DEDICATED_LDO
+# a SOC_PSRAM_HAS_DEDICATED_LDO nie istnieje w esp32s3/soc_caps.h. Twarda zależność,
+# nie pokrętło. Bez znaczenia przy deep sleepie.
+# NIGDY nie wołaj esp_sleep_pd_config(ESP_PD_DOMAIN_VDDSDIO, OFF) — niszczy PSRAM.
+
+#--- Konsola: natywne USB-Serial-JTAG (303A:1001), płytka nie ma mostka ---------
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_PHY_ENABLE_USB=y
+
+#--- mbedTLS: powód, dla którego cały ten stos to ESP-IDF ----------------------
+# Certyfikat *.googleapis.com ma 17 nazw SAN. Żaden no_std-owy stos TLS ze stałymi
+# tablicami tego nie zweryfikuje (embedded-tls: MAX_SAN_DNS_NAMES = 3).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=200
+CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN=y
+# NIE ZMNIEJSZAĆ. Google nie honoruje max_fragment_length z RFC 6066; mniejsza wartość
+# to utajony, zależny od hosta błąd handshake'u (MBEDTLS_ERR_SSL_INVALID_RECORD).
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=16384
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_2=y
+CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+CONFIG_MBEDTLS_CLIENT_SSL_SESSION_TICKETS=y
+# Z ALWAYSINTERNAL=4096 bufor wejściowy 16 KB i tak ląduje w PSRAM. EXTERNAL_MEM_ALLOC
+# zepchnąłby tam WSZYSTKIE alokacje mbedTLS, łącznie ze źródłami DMA dla sprzętowego AES/SHA.
+CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+CONFIG_MBEDTLS_HAVE_TIME=y
+# Celowo =n w v1: przy =y padnięta bateryjka RTC albo zablokowany NTP ZAMURUJE
+# urządzenie (SNTP nie przejdzie po HTTPS, a HTTPS nie przejdzie bez czasu).
+# Świeżość danych pilnujemy programowo. Przełącz na =y, gdy ścieżka RTC będzie sprawdzona.
+CONFIG_MBEDTLS_HAVE_TIME_DATE=n
+
+#--- lwIP / SNTP ---------------------------------------------------------------
+CONFIG_LWIP_IPV6=n
+CONFIG_LWIP_MAX_SOCKETS=8
+CONFIG_LWIP_SO_RCVBUF=y
+# Domyślnie 1 — przy tej wartości SntpConf::default() po cichu gubi 3 z 4 serwerów puli.
+CONFIG_LWIP_SNTP_MAX_SERVERS=4
+# Domyślnie y, co daje DO 5000 ms LOSOWEGO czasu z włączonym radiem na każde wybudzenie,
+# dla thundering herd, którego i tak nie jesteśmy częścią.
+CONFIG_LWIP_SNTP_STARTUP_DELAY=n
+CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
+
+#--- Wi-Fi ---------------------------------------------------------------------
+CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=13
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=y
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=y
+CONFIG_LWIP_ESP_GRATUITOUS_ARP=n
+
+#--- Stosy (std Rust potrzebuje więcej niż C) ----------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=8192
+# CONFIG_FREERTOS_UNICORE zostaje WYŁĄCZONE: epdiy odpala zadania renderujące na obu rdzeniach.
+
+#--- Watchdogi -----------------------------------------------------------------
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+# Domyślne n jest ZŁE dla urządzenia bateryjnego bez opieki: zawieszony task
+# rozładuje ogniwo do zera.
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+# Blokujące wypchnięcie klatki na panel zagładza task idle.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+CONFIG_ESP_INT_WDT=y
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
+CONFIG_BOOTLOADER_WDT_ENABLE=y
+CONFIG_BOOTLOADER_WDT_TIME_MS=9000
+
+#--- Brownout ------------------------------------------------------------------
+# NAJNIŻSZY próg, celowo. Detektor pilnuje szyny 3.3 V. Impuls 350 mA przy nadawaniu
+# WiFi na zużytym ogniwie przez LDO ME6217 nie może stać się pętlą resetów, a reset
+# w trakcie odświeżania z podniesionymi szynami TPS65185 to jedyna naprawdę
+# szkodliwa awaria na tej płytce. Prawdziwe odcięcie robimy programowo z BQ27220.
+CONFIG_ESP_BROWNOUT_DET=y
+CONFIG_ESP_BROWNOUT_DET_LVL_SEL_7=y
+
+#--- Logi / rozmiar ------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# Wykompilowuje każdy format string z ESP_LOGD/ESP_LOGV.
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+
+#--- Deskryptor aplikacji ------------------------------------------------------
+CONFIG_APP_COMPILE_TIME_DATE=y
+# OTA weszło. Świeżo wgrany obraz startuje w stanie PENDING_VERIFY i musi zawołać
+# esp_ota_mark_app_valid_cancel_rollback() przed kolejnym resetem, inaczej bootloader
+# wraca do poprzedniego slotu. Wołamy to na końcu udanego cyklu — patrz
+# `net::ota::mark_running_valid`.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
