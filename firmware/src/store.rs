@@ -124,59 +124,6 @@ impl Store {
             .context("zapis hasła")
     }
 
-    /// Kasuje pojedyncze pole. `false` = nie ma takiego pola.
-    ///
-    /// Mapowanie nazwa -> klucz NVS siedzi tutaj, obok stałych, a nie w konsoli:
-    /// klucz NVS ma limit 15 znaków i bywa krótszy niż nazwa, którą wpisuje
-    /// człowiek, więc te dwie rzeczy muszą się rozjeżdżać w jednym miejscu.
-    pub fn clear(&mut self, field: &str) -> Result<bool> {
-        let key = match field.trim() {
-            "ssid" => KEY_SSID,
-            "pass" | "haslo" => KEY_PASSWORD,
-            "ics" => KEY_ICS_URL,
-            "ics2" => KEY_ICS_URL_2,
-            "tz" | "strefa" => KEY_TIMEZONE,
-            "interval" | "odstep" => KEY_INTERVAL,
-            "ota" => KEY_OTA_URL,
-            "rotation" | "obrot" => KEY_ROTATION,
-            _ => return Ok(false),
-        };
-        self.nvs
-            .remove(key)
-            .with_context(|| format!("kasowanie `{key}`"))?;
-        Ok(true)
-    }
-
-    pub fn set_ics_url(&mut self, url: &str) -> Result<()> {
-        self.nvs
-            .set_str(KEY_ICS_URL, url)
-            .context("zapis adresu kalendarza")
-    }
-
-    pub fn set_ics_url_secondary(&mut self, url: &str) -> Result<()> {
-        self.nvs
-            .set_str(KEY_ICS_URL_2, url)
-            .context("zapis drugiego adresu kalendarza")
-    }
-
-    pub fn set_timezone(&mut self, tz: &str) -> Result<()> {
-        self.nvs
-            .set_str(KEY_TIMEZONE, tz)
-            .context("zapis strefy czasowej")
-    }
-
-    pub fn set_interval(&mut self, seconds: u32) -> Result<()> {
-        self.nvs
-            .set_u32(KEY_INTERVAL, seconds)
-            .context("zapis odstępu")
-    }
-
-    pub fn set_ota_url(&mut self, url: &str) -> Result<()> {
-        self.nvs
-            .set_str(KEY_OTA_URL, url)
-            .context("zapis adresu manifestu OTA")
-    }
-
     /// Ile razy próbowaliśmy już wgrać którą wersję.
     pub fn ota_attempts(&self) -> Attempts {
         Attempts {

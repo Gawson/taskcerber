@@ -224,8 +224,8 @@ fn scenario_provisioning() -> Model {
     m.net = NetState::NeedsAuth;
     m.tiles = vec![
         Tile::new("krok 1", "podłącz USB"),
-        Tile::new("krok 2", "otwórz konsolę"),
-        Tile::new("krok 3", "ssid, pass, ics"),
+        Tile::new("krok 2", "otwórz stronę"),
+        Tile::new("krok 3", "wpisz WiFi"),
     ];
     m
 }

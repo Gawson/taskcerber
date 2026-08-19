@@ -25,7 +25,6 @@
 //!    uszkodzić panel.
 
 mod board;
-mod console;
 mod epd;
 mod i2c;
 mod net;
@@ -131,22 +130,9 @@ fn run(mut state: RtcState) -> Result<u64> {
         }
     }
 
-    // --- 2. Konfiguracja i konsola --------------------------------------------
+    // --- 2. Konfiguracja ------------------------------------------------------
     let mut store = Store::open(nvs_partition.clone()).context("nie mogę otworzyć NVS")?;
-    let mut config = store.load();
-
-    // Konsola stoi PRZED wszystkim, co z konfiguracji korzysta: SSID wpisane przed
-    // chwilą ma zadziałać w tym cyklu, a nie za pół godziny. Otwiera się wyłącznie
-    // przy podłączonym hoście USB — szczegóły i arytmetyka w `console`.
-    if console::host_attached() {
-        if console::run(&mut store, &config) {
-            config = store.load();
-            info!("konfiguracja zmieniona z konsoli");
-        }
-    } else {
-        info!("brak hosta USB — konsola konfiguracyjna pominięta");
-    }
-
+    let config = store.load();
     let home_tz = config.tz();
     let rotation = config.rotation;
 
@@ -521,16 +507,15 @@ fn paint(
 /// Ekran startowy dla urządzenia bez konfiguracji.
 ///
 /// Pokazywany, dopóki w NVS nie ma danych WiFi i adresu kalendarza — czyli zaraz
-/// po wgraniu firmware'u z przeglądarki. Drogą wyjścia z tego ekranu jest konsola
-/// konfiguracyjna po USB — patrz [`console`].
+/// po wgraniu firmware'u z przeglądarki.
 fn provisioning_model(now: NaiveDateTime) -> Model {
     let mut model = Model::empty(now);
     model.firmware = format!("t5s3pro {VERSION}");
     model.net = NetState::NeedsAuth;
     model.tiles = vec![
         dashboard::model::Tile::new("krok 1", "podłącz USB"),
-        dashboard::model::Tile::new("krok 2", "otwórz konsolę"),
-        dashboard::model::Tile::new("krok 3", "ssid, pass, ics"),
+        dashboard::model::Tile::new("krok 2", "otwórz stronę"),
+        dashboard::model::Tile::new("krok 3", "wpisz WiFi"),
     ];
     model
 }

@@ -136,36 +136,6 @@ Jeśli ostrzeżenie przeszkadza, są dwie drogi bez niego:
    na drugim komputerze, wpisany adres `http://192.168.1.152:8000`, restart
    przeglądarki. Wtedy wystarczy zwykłe `python3 -m http.server`.
 
-### Konfiguracja urządzenia
-
-Świeżo wgrane urządzenie nie ma ani danych WiFi, ani adresu kalendarza, i pokazuje
-ekran konfiguracji. Wpisuje się je **konsolą po USB** — tym samym kablem, którym
-się flashuje, bo płytka ma natywne USB-Serial-JTAG.
-
-Po wgraniu firmware'u kliknij na stronie flashera **Logs & Console** (albo odpal
-`espflash monitor`) i wpisz trzy polecenia:
-
-```
-ssid MojaSiec
-pass moje-haslo
-ics  https://calendar.google.com/calendar/ical/.../private-.../basic.ics
-```
-
-Zapis idzie prosto do NVS i działa **jeszcze w tym cyklu** — nie trzeba restartować.
-`?` pokazuje pełną listę, `show` bieżący stan (adresy zamaskowane), `done` zamyka
-konsolę i puszcza urządzenie dalej. Poza tym: `ics2` (drugi kanał), `ota` (manifest
-aktualizacji), `tz`, `interval`, `clear <pole>`.
-
-Wartością polecenia jest **cała reszta wiersza**, więc spacje w haśle i w nazwie
-sieci są w porządku; polskie znaki też.
-
-> **Konsola otwiera się tylko przy podłączonym hoście USB**, i to nie jest
-> oszczędność na wyrost. Urządzenie bez konfiguracji budzi się co pół godziny, więc
-> bezwarunkowe okno 90 s kosztowałoby ~2400 mAs na cykl — kilka razy więcej niż cały
-> udany cykl z siecią (~360 mAs). Pytamy o to `usb_serial_jtag_is_connected()`,
-> a nie ładowarkę: powerbank nie wysyła pakietów SOF i słusznie nie liczy się jako
-> host, a I²C do BQ25896 nie jest jeszcze zweryfikowane na tej płytce.
-
 ### Aktualizacja przez sieć (OTA)
 
 `./tools/build-image.sh` publikuje obok sklejki dla webflashera dwa dodatkowe pliki:
@@ -361,7 +331,6 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 | Boot i render na panelu | **uruchomione** — płytka wstaje, rysuje ekran konfiguracji |
 | Czyszczenie panelu, zatrzaski magistrali | **poprawione i sprawdzone na szkle** — obraz czysty po wybudzeniu |
 | Dwie orientacje | **napisane**, pion sprawdzony na szkle, poziom nie |
-| Konsola konfiguracyjna | **napisana, nieuruchomiona** — kompiluje się, czeka na kabel |
 | Decyzja OTA i polityka zasilania | **zweryfikowane** — 27 testów w `devlogic`, chodzą na hoście |
 | I²C, zasilanie, sieć, dotyk | **nieuruchomione** |
 | OTA — transport | **napisany, nieuruchomiony** — włącza się konsolą, wersje z gita |
