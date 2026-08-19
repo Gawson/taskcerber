@@ -51,8 +51,19 @@ use crate::power::{shutdown, Mode, Policy};
 use crate::source::{ics::IcsSource, EventSource};
 use crate::store::{Config, Store};
 
-/// Wersja pokazywana w stopce i raportowana przez deskryptor aplikacji.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Wersja pokazywana w stopce i **porównywana przez OTA**.
+///
+/// To nie jest `CARGO_PKG_VERSION`, tylko łańcuch z `tools/version.sh` z doklejonym
+/// commitem: `0.1.0+g1a2b3c4`. Sam semver z `Cargo.toml` zmienia się raz na wydanie,
+/// więc dopóki nikt go ręcznie nie podbije, urządzenie zawsze widzi w manifeście
+/// swoją własną wersję i nie aktualizuje się nigdy — nie da się nawet sprawdzić,
+/// czy OTA działa. Ten sam skrypt wypełnia `version` w `ota.json`.
+///
+/// Deskryptor aplikacji (`esp_app_desc!`) niesie dalej goły semver, bo makro
+/// z esp-idf-sys czyta `CARGO_PKG_VERSION` na sztywno. `espflash` pokaże więc
+/// „0.1.0", a OTA porównuje pełny łańcuch — `check-image.sh` pilnuje, żeby ten
+/// z `ota.json` faktycznie był w obrazie.
+const VERSION: &str = env!("T5_VERSION");
 
 /// Ile dni do przodu pokazujemy.
 const HORIZON_DAYS: i64 = 14;
@@ -166,7 +177,7 @@ fn run(mut state: RtcState) -> Result<u64> {
             .and_hms_opt(0, 0, 0)
             .unwrap()
     });
-    let mode = policy.mode(power_status, fuel, now);
+    let mode = power::mode_from_hardware(&policy, power_status, fuel, now);
     info!(
         "tryb: {mode:?}, ogniwo: {:?}%, USB: {}",
         fuel.percent, power_status.usb_present
@@ -189,17 +200,24 @@ fn run(mut state: RtcState) -> Result<u64> {
             &config,
             &hw,
             &mut state,
+            &mut store,
             home_tz,
             now,
-            policy.should_update(mode, fuel),
+            power::may_update(&policy, mode, fuel),
         ) {
             Ok(out) => {
                 // Restart natychmiast: radio jest już wyłączone, a panelu jeszcze
                 // nie dotykaliśmy — `Epd::new` jest niżej. Reset przy podniesionych
                 // szynach TPS65185 potrafi uszkodzić panel, więc kolejność ma znaczenie.
+                //
+                // `state.store()` tutaj NIE MA i to nie jest przeoczenie: bootloader
+                // przeładowuje segmenty RTC z obrazu przy każdym resecie, który nie
+                // jest wybudzeniem z deep sleepu, więc cokolwiek byśmy zapisali,
+                // nowy obraz i tak zobaczy zimny start. Cena jest znana i jednorazowa:
+                // jeden pełny skan AP i jedno odświeżenie panelu bez porównania CRC.
+                // Licznik prób OTA, który jako jedyny NIE MOŻE tego przeżyć bez szkody,
+                // siedzi w NVS — patrz nagłówek `devlogic::ota`.
                 if out.ota_installed {
-                    state.last_known_unix = net::time::now_unix();
-                    state.store();
                     info!("restart do nowego obrazu");
                     // SAFETY: prosty restart z ESP-IDF.
                     unsafe { esp_idf_svc::sys::esp_restart() };
@@ -314,6 +332,7 @@ fn fetch_everything(
     config: &Config,
     hw: &Board,
     state: &mut RtcState,
+    store: &mut Store,
     home_tz: chrono_tz::Tz,
     now: NaiveDateTime,
     ota_allowed: bool,
@@ -380,7 +399,7 @@ fn fetch_everything(
     let mut ota_installed = false;
     if ota_allowed {
         match config.ota_url.as_deref() {
-            Some(url) => match net::ota::check_and_apply(url, VERSION, state) {
+            Some(url) => match net::ota::check_and_apply(url, VERSION, store) {
                 Ok(net::ota::Outcome::Installed { version }) => {
                     info!("OTA: wgrana wersja {version}, restart po wyłączeniu radia");
                     ota_installed = true;

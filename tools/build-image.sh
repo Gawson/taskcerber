@@ -26,6 +26,13 @@ if [[ -z "${IDF_PATH:-}" && -f "$HOME/export-esp.sh" ]]; then
   . "$HOME/export-esp.sh"
 fi
 
+# Wersja liczona RAZ, przekazana do cargo i użyta w manifestach. To jest ta
+# gwarancja, że obraz i ota.json nie mają jak się rozjechać: build.rs bierze
+# T5_VERSION ze środowiska, a nie liczy jej po swojemu.
+T5_VERSION=$(./tools/version.sh)
+export T5_VERSION
+echo "==> wersja: $T5_VERSION"
+
 echo "==> buduję firmware"
 (cd firmware && cargo build --release)
 
@@ -37,8 +44,6 @@ for f in "$ELF" "$BOOTLOADER"; do
 done
 
 mkdir -p "$OUT"
-
-VERSION=$(grep -m1 '^version' firmware/Cargo.toml | cut -d'"' -f2)
 
 echo "==> sklejam obraz"
 espflash save-image \
@@ -75,7 +80,7 @@ OTA_SHA=$(sha256sum "$OUT/firmware-ota.bin" | cut -d" " -f1)
 OTA_SIZE=$(stat -c%s "$OUT/firmware-ota.bin")
 cat > "$OUT/ota.json" <<JSON
 {
-  "version": "$VERSION",
+  "version": "$T5_VERSION",
   "url": "firmware-ota.bin",
   "sha256": "$OTA_SHA",
   "size": $OTA_SIZE

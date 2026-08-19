@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 use dashboard::Rotation;
+use devlogic::ota::Attempts;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 
 const NAMESPACE: &str = "t5cal";
@@ -23,6 +24,14 @@ const KEY_TIMEZONE: &str = "tz";
 const KEY_INTERVAL: &str = "interval_s";
 const KEY_ROTATION: &str = "rotation";
 const KEY_OTA_URL: &str = "ota_url";
+
+// Licznik prób OTA. Leży w NVS, a nie w pamięci RTC, i to jest poprawka konkretnego
+// błędu: bootloader przeładowuje segmenty RTC z obrazu przy każdym resecie, który
+// nie jest wybudzeniem z deep sleepu — a po wgraniu nowego obrazu wołamy
+// `esp_restart()`. Licznik zerował się więc dokładnie w tym scenariuszu, przed
+// którym miał chronić. Pełne wyjaśnienie: nagłówek `devlogic::ota`.
+const KEY_OTA_TRY_VER: &str = "ota_try_ver";
+const KEY_OTA_TRY_N: &str = "ota_try_n";
 
 /// Maksymalna długość wartości tekstowej. Adresy iCal Google mają ~120 znaków;
 /// zapas jest na wypadek innych źródeł.
@@ -166,6 +175,47 @@ impl Store {
         self.nvs
             .set_str(KEY_OTA_URL, url)
             .context("zapis adresu manifestu OTA")
+    }
+
+    /// Ile razy próbowaliśmy już wgrać którą wersję.
+    pub fn ota_attempts(&self) -> Attempts {
+        Attempts {
+            version: self.get_string(KEY_OTA_TRY_VER).unwrap_or_default(),
+            count: self.nvs.get_u8(KEY_OTA_TRY_N).ok().flatten().unwrap_or(0),
+        }
+    }
+
+    pub fn set_ota_attempts(&mut self, attempts: &Attempts) -> Result<()> {
+        self.nvs
+            .set_str(KEY_OTA_TRY_VER, &attempts.version)
+            .context("zapis wersji próbowanej przez OTA")?;
+        self.nvs
+            .set_u8(KEY_OTA_TRY_N, attempts.count)
+            .context("zapis licznika prób OTA")
+    }
+
+    /// Zeruje licznik prób — wołane, gdy działamy już na wersji z manifestu.
+    ///
+    /// Sprawdzenie „czy jest co kasować" nie jest mikrooptymalizacją: to jest
+    /// ścieżka, którą urządzenie przechodzi przy **każdym udanym cyklu**, czyli
+    /// kilkadziesiąt razy dziennie przez lata. Bezwarunkowy zapis byłby
+    /// bezwarunkowym cyklem kasowania sektora we flashu.
+    pub fn clear_ota_attempts(&mut self) -> Result<()> {
+        if self
+            .nvs
+            .find_key(KEY_OTA_TRY_N)
+            .context("sprawdzenie licznika prób OTA")?
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.nvs
+            .remove(KEY_OTA_TRY_N)
+            .context("kasowanie licznika prób OTA")?;
+        self.nvs
+            .remove(KEY_OTA_TRY_VER)
+            .context("kasowanie wersji próbowanej przez OTA")?;
+        Ok(())
     }
 
     pub fn set_rotation(&mut self, rotation: Rotation) -> Result<()> {

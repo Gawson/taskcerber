@@ -21,7 +21,7 @@ use log::info;
 
 // Bump przy KAŻDEJ zmianie układu `RtcState`. Stary stan w pamięci RTC ma inny
 // rozmiar i przesunięcia pól; bez zmiany magii zostałby odczytany jako śmieci.
-const MAGIC: u32 = 0x5435_5F32; // "T5_2"
+const MAGIC: u32 = 0x5435_5F33; // "T5_3"
 
 /// Ile razy z rzędu sieć musi zawieść, zanim wydłużymy odstępy.
 pub const FAILURES_BEFORE_BACKOFF: u8 = 3;
@@ -48,11 +48,13 @@ pub struct RtcState {
     pub ap_bssid: [u8; 6],
     /// Czas ostatniego udanego pobrania (unix), 0 = nigdy.
     pub last_success_unix: i64,
-    /// CRC32 wersji, którą próbujemy wgrać przez OTA. 0 = żadnej.
-    pub ota_target_crc: u32,
-    /// Ile razy próbowaliśmy wgrać tę wersję.
-    pub ota_attempts: u8,
 }
+
+// Licznika prób OTA tutaj NIE MA i to jest świadome. Bootloader przeładowuje
+// segmenty RTC z obrazu przy każdym resecie, który nie jest wybudzeniem z deep
+// sleepu, więc `esp_restart()` po wgraniu nowego obrazu kasuje całą tę strukturę —
+// łącznie z licznikiem, który miał chronić przed pętlą aktualizacji. Licznik
+// mieszka w NVS; wyjaśnienie w nagłówku `devlogic::ota`.
 
 // SAFETY: struktura jest `repr(C)` i złożona wyłącznie z typów POD; leży w pamięci
 // RTC-FAST, do której dostęp mamy jednowątkowo, zanim wystartują inne zadania.
@@ -68,8 +70,6 @@ static mut RTC_STATE: RtcState = RtcState {
     ap_channel: 0,
     ap_bssid: [0; 6],
     last_success_unix: 0,
-    ota_target_crc: 0,
-    ota_attempts: 0,
 };
 
 impl RtcState {
@@ -92,8 +92,6 @@ impl RtcState {
                 ap_channel: 0,
                 ap_bssid: [0; 6],
                 last_success_unix: 0,
-                ota_target_crc: 0,
-                ota_attempts: 0,
             };
         }
 
@@ -147,33 +145,6 @@ impl RtcState {
     /// Czy wymusić pełne odświeżenie zamiast szybkiego.
     pub fn needs_full_refresh(&self) -> bool {
         self.fast_refreshes >= crate::epd::FAST_REFRESHES_BEFORE_FULL
-    }
-
-    /// Czy wolno jeszcze próbować OTA do wskazanej wersji.
-    ///
-    /// Zabezpiecza przed pętlą, w której manifest obiecuje wersję, a wgrany obraz
-    /// raportuje inną — bez licznika urządzenie pobierałoby 3 MB co cykl aż do
-    /// rozładowania ogniwa.
-    pub fn ota_allowed(&self, version: &str) -> bool {
-        let crc = crc32(version.as_bytes());
-        crc != self.ota_target_crc || self.ota_attempts < crate::net::ota::MAX_ATTEMPTS
-    }
-
-    /// Odnotowuje próbę wgrania wskazanej wersji.
-    pub fn record_ota_attempt(&mut self, version: &str) {
-        let crc = crc32(version.as_bytes());
-        if crc == self.ota_target_crc {
-            self.ota_attempts = self.ota_attempts.saturating_add(1);
-        } else {
-            self.ota_target_crc = crc;
-            self.ota_attempts = 1;
-        }
-    }
-
-    /// Zeruje licznik prób — wołane, gdy działamy już na wersji z manifestu.
-    pub fn clear_ota_attempts(&mut self) {
-        self.ota_target_crc = 0;
-        self.ota_attempts = 0;
     }
 
     /// Odnotowuje wykonane odświeżenie.

@@ -29,7 +29,7 @@ zwykłym `cargo test` — zamiast być debugowane przez wgrywanie i patrzenie na
 Wszystko poniżej działa na zwykłym stabilnym Ruście, bez toolchainu Xtensa.
 
 ```bash
-cargo test                              # 101 testów: render, iCal, dotyk, paginacja, OTA
+cargo test                              # 123 testy: render, iCal, dotyk, paginacja, polityka, OTA
 cargo run -p preview -- all             # zrzuty PNG do out/ (pionowo)
 cargo run -p preview -- all landscape   # to samo poziomo, pliki z sufiksem
 cargo run -p simulator                  # interaktywne okno, mysz jako dotyk
@@ -176,6 +176,19 @@ sieci są w porządku; polskie znaki też.
 | `dist/firmware-ota.bin` | sama aplikacja — **dla OTA** |
 | `dist/ota.json` | wersja, względny adres obrazu, SHA-256, rozmiar |
 
+**Wersja bierze się z gita, nie z `Cargo.toml`.** `tools/version.sh` wypisuje
+`0.1.0+g1a2b3c4` (albo `0.1.0+g1a2b3c4.d5f9a2` przy brudnym drzewie) i jest jedynym
+miejscem, w którym się ją liczy: `build-image.sh` eksportuje wynik jako `T5_VERSION`,
+`build.rs` wkompilowuje go w obraz, a ten sam łańcuch ląduje w `ota.json`. Bez tego
+OTA nie ma jak wystartować — semver z `Cargo.toml` zmienia się raz na wydanie, więc
+urządzenie zawsze widziałoby w manifeście własną wersję i nie aktualizowało się
+nigdy. Skrót brudnego drzewa jest tam dlatego, że bring-up robi się
+na niescommitowanych zmianach, a dwa buildy o tej samej wersji wyglądają dokładnie
+jak zepsute OTA.
+
+`check-image.sh` sprawdza, że wersja z `ota.json` **faktycznie jest w obrazie** —
+rozjazd tych dwóch to urządzenie pobierające 3 MB w kółko.
+
 Pomylenie tych dwóch obrazów to urządzenie, które nie wstaje: `esp_ota_write` pisze
 do slotu aplikacji, więc sklejka wylądowałaby tam razem z bootloaderem i tablicą
 partycji. `tools/check-image.sh` sprawdza to jawnie — obraz OTA nie może mieć tablicy
@@ -204,8 +217,17 @@ więc ten sam artefakt działa z GitHub Pages i z serwera w LAN-ie bez przebudow
   **na końcu udanego cyklu**, nie na starcie — obraz ma najpierw udowodnić, że
   potrafi narysować ekran i zasnąć.
 * **SHA-256 z manifestu** liczone w locie i sprawdzane **przed** przestawieniem slotu.
-* **Licznik prób** w pamięci RTC — po trzech nieudanych podejściach do tej samej
-  wersji odpuszczamy, zamiast pobierać 3 MB co cykl aż do rozładowania ogniwa.
+* **Kasujemy tyle slotu, ile trzeba.** Z rozmiarem w manifeście `esp_ota_begin`
+  kasuje zaokrąglone w górę 3 MB zamiast całych 4 MiB. Cena: rozmiar musi być
+  prawdziwy, więc pobranie ma twardy limit i porównanie sumy bajtów na końcu.
+* **Licznik prób w NVS** — po trzech nieudanych podejściach do tej samej wersji
+  odpuszczamy, zamiast pobierać 3 MB co cykl aż do rozładowania ogniwa.
+
+  Był najpierw w pamięci RTC i **nie działał**. Bootloader przeładowuje segmenty RTC
+  z obrazu przy każdym resecie, który nie jest wybudzeniem z deep sleepu
+  (`should_load()` w `esp_image_format.c`), a po wgraniu obrazu wołamy `esp_restart()`.
+  Licznik zerował się więc dokładnie w tym jednym scenariuszu, przed którym miał
+  chronić. NVS przeżywa i reset, i przeflashowanie z przeglądarki.
 * **Próg zasilania** — OTA tylko na USB albo powyżej 50% naładowania.
 * **Kabel jako wyjście awaryjne** — `otadata` leży w luce, którą webflasher zapisuje,
   więc przeflashowanie z przeglądarki zawsze wraca do `ota_0`.
@@ -213,6 +235,30 @@ więc ten sam artefakt działa z GitHub Pages i z serwera w LAN-ie bez przebudow
 Aktualizacja idzie **po** pobraniu kalendarza i **przed** wyłączeniem radia. Restart
 następuje przy zgaszonym radiu i nietkniętym panelu — reset przy podniesionych szynach
 TPS65185 potrafi uszkodzić panel.
+
+#### Jak to sprawdzić po LAN-ie
+
+```bash
+./tools/build-image.sh                       # wersja A — wgraj ją z przeglądarki
+python3 -m http.server -d dist 8000          # ten sam katalog serwuje ota.json
+
+# w konsoli urządzenia (Logs & Console albo espflash monitor):
+#   ota http://192.168.1.152:8000/ota.json
+#   show          <- sprawdź, czy adres się zgadza
+#   done
+
+git commit -am "cokolwiek" && ./tools/build-image.sh   # wersja B, nowa wersja z gita
+```
+
+Urządzenie musi być na USB albo powyżej 50% naładowania (`Policy::should_update`),
+bo inaczej świadomie pominie aktualizację. W logu szukaj kolejno:
+`OTA: <A> -> <B>, pobieram`, `OTA: wgrane N B`, `restart do nowego obrazu`,
+a po restarcie `OTA: bieżący slot potwierdzony jako sprawny` — to ostatnie pojawia
+się dopiero na końcu **udanego** cyklu i jest dowodem, że rollback został odwołany.
+
+Warto zrobić też przebieg negatywny: podmień jeden znak w `sha256` w `ota.json`
+i sprawdź, czy w logu jest `SHA-256 się nie zgadza` i czy urządzenie **nie**
+przestawiło slotu.
 
 ### esp-web-tools jest w repozytorium
 
@@ -316,8 +362,9 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 | Czyszczenie panelu, zatrzaski magistrali | **poprawione i sprawdzone na szkle** — obraz czysty po wybudzeniu |
 | Dwie orientacje | **napisane**, pion sprawdzony na szkle, poziom nie |
 | Konsola konfiguracyjna | **napisana, nieuruchomiona** — kompiluje się, czeka na kabel |
+| Decyzja OTA i polityka zasilania | **zweryfikowane** — 27 testów w `devlogic`, chodzą na hoście |
 | I²C, zasilanie, sieć, dotyk | **nieuruchomione** |
-| OTA | **napisane, nieuruchomione** — da się już włączyć konsolą |
+| OTA — transport | **napisany, nieuruchomiony** — włącza się konsolą, wersje z gita |
 
 Największa niewiadoma projektu — czy `extra_components` w ogóle zbierze epdiy i czy
 nazwy z bindgena się zgodzą — **jest już rozwiązana**, a płytka wstaje i rysuje.

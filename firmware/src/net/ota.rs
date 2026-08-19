@@ -1,10 +1,14 @@
-//! Aktualizacja firmware'u przez HTTPS.
+//! Aktualizacja firmware'u przez HTTPS — transport.
+//!
+//! Decyzja „czy w ogóle, którą wersję i skąd" siedzi w [`devlogic::ota`] i jest
+//! przetestowana na hoście. Tutaj zostaje to, czego bez ESP-IDF nie ma: pobranie
+//! strumienia, liczenie SHA-256 sprzętowym mbedTLS-em i zapis do wolnego slotu.
 //!
 //! # Dlaczego to działa bez ruszania tablicy partycji
 //!
 //! `firmware/partitions.csv` ma od początku dwa sloty aplikacji po 4 MiB
 //! (`ota_0` @ 0x010000, `ota_1` @ 0x410000) i `otadata` @ 0x009000. Aplikacja zajmuje
-//! ~71% slotu, więc mieści się z zapasem.
+//! ~73% slotu, więc mieści się z zapasem.
 //!
 //! Właściwość uboczna tamtego układu okazuje się tutaj siatką bezpieczeństwa:
 //! `otadata` leży w luce, którą `espflash --merge` wypełnia bajtami `0xFF` i którą
@@ -23,9 +27,10 @@
 //!    i porównujemy **przed** przestawieniem slotu startowego. `esp_ota_end()` sprawdza
 //!    dodatkowo sumę wbudowaną w sam obraz, ale ta pilnuje wyłącznie spójności — nie
 //!    tego, czy dostaliśmy obraz, o który prosiliśmy.
-//! 3. **Licznik prób.** Gdyby manifest obiecywał wersję, której wgrany obraz nie
-//!    raportuje, urządzenie kręciłoby OTA w kółko aż do rozładowania ogniwa.
-//!    Po [`MAX_ATTEMPTS`] próbach tej samej wersji odpuszczamy aż do zmiany manifestu.
+//! 3. **Licznik prób w NVS.** Manifest obiecujący wersję, której wgrany obraz nie
+//!    raportuje, zapętliłby pobieranie 3 MB aż do rozładowania ogniwa. Dlaczego
+//!    akurat NVS, a nie pamięć RTC, w której ten licznik był najpierw — nagłówek
+//!    [`devlogic::ota`].
 //! 4. **Próg zasilania.** Pobranie ~3 MB przez HTTPS trzyma radio na antenie o rząd
 //!    wielkości dłużej niż zwykły cykl. Bramkuje to `Policy::should_update`.
 //!
@@ -39,52 +44,23 @@
 use std::io::Read;
 
 use anyhow::{bail, Context, Result};
+use devlogic::ota::{self, Decision, Plan};
 use esp_idf_svc::ota::EspOta;
 use esp_idf_svc::sys;
 use log::{info, warn};
-use serde::Deserialize;
 
 use crate::net::http;
-use crate::power::rtc_state::RtcState;
-
-/// Ile razy wolno próbować tej samej wersji, zanim uznamy ją za niewgrywalną.
-pub const MAX_ATTEMPTS: u8 = 3;
-
-/// Manifest to kilkaset bajtów; wszystko powyżej znaczy, że pobieramy nie to co trzeba.
-const MAX_MANIFEST_BYTES: usize = 4096;
-
-/// Widełki rozsądnego rozmiaru obrazu aplikacji. Dolna granica odsiewa strony błędu
-/// podane z kodem 200, górna — obraz, który i tak nie zmieści się w slocie.
-const MIN_IMAGE_BYTES: usize = 256 * 1024;
-const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+use crate::store::Store;
 
 /// Kawałek strumienia zapisywany jednym `esp_ota_write`.
 const CHUNK: usize = 4096;
-
-/// Opis dostępnej aktualizacji.
-///
-/// Publikowany obok webflashera, więc CI generuje go tym samym krokiem co obraz.
-/// `sha256` jest wymagane — bez sumy kontrolnej odmawiamy aktualizacji.
-#[derive(Debug, Deserialize)]
-pub struct Manifest {
-    pub version: String,
-    /// Adres obrazu. Może być względny — wtedy rozwiązujemy go względem katalogu,
-    /// w którym leży manifest. Dzięki temu ten sam artefakt działa i z GitHub Pages,
-    /// i z serwera w sieci lokalnej, bez przebudowy.
-    pub url: String,
-    /// SHA-256 obrazu aplikacji, zapis szesnastkowy.
-    pub sha256: String,
-    /// Rozmiar w bajtach. Opcjonalny, ale jeśli jest — sprawdzamy.
-    #[serde(default)]
-    pub size: Option<usize>,
-}
 
 #[derive(Debug)]
 pub enum Outcome {
     /// Manifest podaje tę samą wersję, która działa.
     UpToDate,
     /// Jest nowsza, ale nie teraz — powód w polu.
-    Skipped(&'static str),
+    Skipped(String),
     /// Wgrane i zaktywowane. Wołający ma zrestartować urządzenie.
     Installed { version: String },
 }
@@ -97,48 +73,46 @@ pub enum Outcome {
 pub fn check_and_apply(
     manifest_url: &str,
     running_version: &str,
-    state: &mut RtcState,
+    store: &mut Store,
 ) -> Result<Outcome> {
     let manifest = fetch_manifest(manifest_url).context("nie mogę pobrać manifestu OTA")?;
+    let mut attempts = store.ota_attempts();
 
-    if manifest.version == running_version {
-        info!("OTA: wersja {running_version} jest aktualna");
-        state.clear_ota_attempts();
-        return Ok(Outcome::UpToDate);
-    }
-
-    if !state.ota_allowed(&manifest.version) {
-        warn!(
-            "OTA: {} próbowane już {MAX_ATTEMPTS} razy bez skutku — odpuszczam",
-            manifest.version
-        );
-        return Ok(Outcome::Skipped("wyczerpany limit prób tej wersji"));
-    }
-
-    let expected = parse_hex32(&manifest.sha256)
-        .with_context(|| format!("zła suma SHA-256 w manifeście: {}", manifest.sha256))?;
-
-    if let Some(size) = manifest.size {
-        if !(MIN_IMAGE_BYTES..=MAX_IMAGE_BYTES).contains(&size) {
-            bail!("manifest podaje rozmiar {size} B — poza dopuszczalnym zakresem");
+    let plan = match ota::decide(&manifest, manifest_url, running_version, &attempts) {
+        Decision::UpToDate => {
+            info!("OTA: wersja {running_version} jest aktualna");
+            // Porażka kasowania licznika nie jest powodem, żeby przerwać cykl —
+            // w najgorszym razie zostanie nieaktualny wpis w NVS.
+            if let Err(e) = store.clear_ota_attempts() {
+                warn!("OTA: nie mogę wyzerować licznika prób: {e:#}");
+            }
+            return Ok(Outcome::UpToDate);
         }
-    }
+        Decision::Refuse(reason) => {
+            warn!("OTA: odpuszczam — {reason}");
+            return Ok(Outcome::Skipped(reason));
+        }
+        Decision::Download(plan) => plan,
+    };
 
-    let image_url = resolve_url(manifest_url, &manifest.url);
     info!(
-        "OTA: {running_version} -> {}, pobieram {image_url}",
-        manifest.version
+        "OTA: {running_version} -> {}, pobieram {}",
+        plan.version, plan.image_url
     );
-    state.record_ota_attempt(&manifest.version);
-    // Licznik prób musi przeżyć nieudaną próbę, a stąd do końca funkcji jest wiele
-    // ścieżek błędu — zapisujemy od razu.
-    state.store();
 
-    let written = download_into_slot(&image_url, expected)?;
-    info!("OTA: wgrane {written} B, wersja {}", manifest.version);
+    // Licznik prób zapisujemy PRZED pobraniem. Stąd do końca funkcji jest wiele
+    // ścieżek błędu i każda z nich musi zostawić ślad — inaczej wersja, która
+    // wywraca się w połowie pobierania, próbowałaby się w nieskończoność.
+    attempts.record(&plan.version);
+    store
+        .set_ota_attempts(&attempts)
+        .context("nie mogę zapisać licznika prób OTA")?;
+
+    let written = download_into_slot(&plan)?;
+    info!("OTA: wgrane {written} B, wersja {}", plan.version);
 
     Ok(Outcome::Installed {
-        version: manifest.version,
+        version: plan.version,
     })
 }
 
@@ -156,23 +130,26 @@ pub fn mark_running_valid() {
     }
 }
 
-fn fetch_manifest(url: &str) -> Result<Manifest> {
+fn fetch_manifest(url: &str) -> Result<ota::Manifest> {
     let mut reader = http::get(url)?;
     let mut body = Vec::new();
     reader
         .by_ref()
-        .take(MAX_MANIFEST_BYTES as u64)
+        .take(ota::MAX_MANIFEST_BYTES as u64)
         .read_to_end(&mut body)
         .context("nie mogę wczytać manifestu")?;
 
     if let Some(e) = reader.error() {
         bail!("pobieranie manifestu przerwane: {e}");
     }
-    if body.len() >= MAX_MANIFEST_BYTES {
-        bail!("manifest większy niż {MAX_MANIFEST_BYTES} B — to nie jest manifest");
+    if body.len() >= ota::MAX_MANIFEST_BYTES {
+        bail!(
+            "manifest większy niż {} B — to nie jest manifest",
+            ota::MAX_MANIFEST_BYTES
+        );
     }
 
-    serde_json::from_slice(&body).context("manifest OTA nie jest poprawnym JSON-em")
+    ota::parse_manifest(&body).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Pobiera obraz prosto do wolnego slotu, licząc po drodze SHA-256.
@@ -182,14 +159,27 @@ fn fetch_manifest(url: &str) -> Result<Manifest> {
 /// kontrolną znamy dopiero na końcu, kiedy dane są już zapisane. Dlatego slot
 /// startowy przestawiamy **po** weryfikacji — do tego momentu wgrany obraz jest
 /// martwy i nieszkodliwy.
-fn download_into_slot(url: &str, expected_sha: [u8; 32]) -> Result<usize> {
-    let mut reader = http::get(url).context("nie mogę pobrać obrazu")?;
+fn download_into_slot(plan: &Plan) -> Result<usize> {
+    let mut reader = http::get(&plan.image_url).context("nie mogę pobrać obrazu")?;
 
-    let mut ota = EspOta::new().context("nie mogę otworzyć OTA")?;
-    let mut update = ota
-        .initiate_update()
-        .context("nie mogę rozpocząć zapisu do slotu OTA")?;
+    let mut esp_ota = EspOta::new().context("nie mogę otworzyć OTA")?;
 
+    // Rozmiar z manifestu przekłada się wprost na to, ile flasha kasujemy.
+    // `initiate_update` przekazuje `OTA_SIZE_UNKNOWN`, a wtedy `esp_ota_begin` kasuje
+    // **cały** slot 4 MiB, zanim przyjdzie pierwszy bajt. Przy obrazie ~3 MB to
+    // megabajt kasowania w zamian za nic. Znany rozmiar zaokrągla się w górę do
+    // sektora i tyle właśnie znika.
+    //
+    // Cena jest taka, że rozmiar musi być PRAWDZIWY: zapis poza skasowany obszar
+    // dałby uszkodzony obraz. Pilnuje tego twardy limit w pętli niżej i porównanie
+    // sumy bajtów na końcu.
+    let mut update = match plan.size {
+        Some(size) => esp_ota.initiate_update_with_known_size(size),
+        None => esp_ota.initiate_update(),
+    }
+    .context("nie mogę rozpocząć zapisu do slotu OTA")?;
+
+    let limit = plan.size.unwrap_or(ota::MAX_IMAGE_BYTES);
     let mut hasher = Sha256::new()?;
     let mut buf = vec![0u8; CHUNK];
     let mut total = 0usize;
@@ -205,9 +195,9 @@ fn download_into_slot(url: &str, expected_sha: [u8; 32]) -> Result<usize> {
         };
 
         total += n;
-        if total > MAX_IMAGE_BYTES {
+        if total > limit {
             let _ = update.abort();
-            bail!("obraz przekroczył {MAX_IMAGE_BYTES} B");
+            bail!("obraz przekroczył {limit} B");
         }
 
         hasher.update(&buf[..n]);
@@ -227,18 +217,29 @@ fn download_into_slot(url: &str, expected_sha: [u8; 32]) -> Result<usize> {
         let _ = update.abort();
         bail!("pobrano {total} B, a serwer zapowiadał inną długość");
     }
-    if total < MIN_IMAGE_BYTES {
-        let _ = update.abort();
-        bail!("pobrano tylko {total} B — to nie jest obraz aplikacji");
+    match plan.size {
+        // Manifest podał rozmiar, więc mamy z czym porównać — i musimy, bo tyle
+        // sektorów skasowaliśmy.
+        Some(size) if total != size => {
+            let _ = update.abort();
+            bail!("pobrano {total} B, a manifest obiecywał {size} B");
+        }
+        // Bez rozmiaru w manifeście zostaje tylko dolna granica rozsądku: strona
+        // błędu podana z kodem 200 nie ma 256 kB.
+        None if total < ota::MIN_IMAGE_BYTES => {
+            let _ = update.abort();
+            bail!("pobrano tylko {total} B — to nie jest obraz aplikacji");
+        }
+        _ => {}
     }
 
     let actual = hasher.finish();
-    if actual != expected_sha {
+    if actual != plan.sha256 {
         let _ = update.abort();
         bail!(
             "SHA-256 się nie zgadza: obraz {}, manifest {}",
-            hex(&actual),
-            hex(&expected_sha)
+            ota::hex(&actual),
+            ota::hex(&plan.sha256)
         );
     }
 
@@ -291,77 +292,5 @@ impl Drop for Sha256 {
     fn drop(&mut self) {
         // SAFETY: kontekst zainicjalizowany w `new`.
         unsafe { sys::mbedtls_sha256_free(&mut self.0) };
-    }
-}
-
-/// Rozwiązuje adres obrazu względem adresu manifestu.
-///
-/// Adres bezwzględny zostaje bez zmian. Względny doklejamy do katalogu manifestu —
-/// czyli tego, co zostaje po obcięciu wszystkiego za ostatnim ukośnikiem. To celowo
-/// nie jest pełna implementacja RFC 3986: manifest jest naszym plikiem i leży obok
-/// obrazu, a pełny parser URL-i to kod, którego nie ma tu czego pilnować.
-fn resolve_url(manifest_url: &str, target: &str) -> String {
-    if target.starts_with("http://") || target.starts_with("https://") {
-        return target.to_string();
-    }
-    // Ucinamy zapytanie i fragment — w ścieżce bazowej nie mają czego szukać.
-    let base = manifest_url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(manifest_url);
-    match base.rfind('/') {
-        Some(i) => format!("{}{}", &base[..=i], target.trim_start_matches('/')),
-        None => target.to_string(),
-    }
-}
-
-fn parse_hex32(s: &str) -> Result<[u8; 32]> {
-    let s = s.trim();
-    if s.len() != 64 {
-        bail!("oczekiwano 64 znaków szesnastkowych, jest {}", s.len());
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
-            .with_context(|| format!("niepoprawny bajt na pozycji {i}"))?;
-    }
-    Ok(out)
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hex_w_obie_strony() {
-        let s = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        assert_eq!(hex(&parse_hex32(s).unwrap()), s);
-    }
-
-    #[test]
-    fn wzgledny_adres_rozwiazuje_sie_wzgledem_manifestu() {
-        assert_eq!(
-            resolve_url("https://example.test/fw/ota.json", "firmware-ota.bin"),
-            "https://example.test/fw/firmware-ota.bin"
-        );
-        assert_eq!(
-            resolve_url("https://example.test/ota.json?v=2", "firmware-ota.bin"),
-            "https://example.test/firmware-ota.bin"
-        );
-        // Bezwzględny zostaje nietknięty.
-        assert_eq!(
-            resolve_url("https://example.test/ota.json", "https://cdn.test/a.bin"),
-            "https://cdn.test/a.bin"
-        );
-    }
-
-    #[test]
-    fn zla_dlugosc_sumy_jest_bledem() {
-        assert!(parse_hex32("abc").is_err());
-        assert!(parse_hex32(&"z".repeat(64)).is_err());
     }
 }

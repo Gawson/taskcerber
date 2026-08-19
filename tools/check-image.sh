@@ -139,6 +139,20 @@ if [[ -f "$OTA_IMG" ]]; then
         have=$(sha256sum "$OTA_IMG" | cut -d' ' -f1)
         [[ "$want" == "$have" ]] || fail "SHA-256 w ota.json ($want) nie zgadza się z obrazem ($have)"
         ok "SHA-256 w ota.json zgadza się z obrazem"
+
+        # Wersja z manifestu MUSI być tym, co obraz o sobie mówi. Rozjazd tych dwóch
+        # to najgorsza awaria, jaką OTA potrafi wyprodukować: urządzenie pobiera
+        # 3 MB, instaluje, restartuje, widzi w manifeście wciąż inną wersję niż
+        # własna — i pobiera znowu. Licznik prób to zatrzyma, ale dopiero po trzech
+        # podejściach, a na baterii to jest realny koszt.
+        #
+        # Jeśli tu padnie po zwykłym `cargo build`: build.rs nie przeliczył wersji,
+        # bo nic go nie unieważniło. `touch firmware/build.rs` i jeszcze raz.
+        want_ver=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "$OTA_JSON" | cut -d'"' -f4)
+        [[ -n "$want_ver" ]] || fail "ota.json nie ma pola version"
+        grep -qF "$want_ver" "$OTA_STR" \
+            || fail "obraz OTA nie zawiera wersji '$want_ver' z ota.json — manifest i obraz się rozjechały"
+        ok "wersja $want_ver zgadza się z obrazem"
     else
         echo "  UWAGA brak $OTA_JSON — urządzenie nie ma z czego czytać wersji"
     fi

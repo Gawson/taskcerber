@@ -22,7 +22,9 @@ rm -rf "$OUT/vendor"
 cp -a web/vendor "$OUT/vendor"
 
 # Wersja w manifeście to wersja firmware'u — esp-web-tools pokazuje ją w dialogu.
-VERSION=$(grep -m1 '^version' firmware/Cargo.toml | cut -d'"' -f2)
+# Ta sama, którą raportuje obraz i którą porównuje OTA. `build-image.sh` podaje ją
+# w środowisku; przy samodzielnym uruchomieniu liczymy ją tym samym skryptem.
+VERSION=${T5_VERSION:-$(./tools/version.sh)}
 sed "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" web/manifest.json > "$OUT/manifest.json"
 
 echo "  strona: $OUT/index.html + manifest.json ($VERSION) + vendor/ ($(find "$OUT/vendor" -type f | wc -l) plików)"

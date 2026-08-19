@@ -1414,8 +1414,6 @@ dependencies = [
  "heapless 0.9.3",
  "icalfeed",
  "log",
- "serde",
- "serde_json",
 ]
 
 [[package]]
