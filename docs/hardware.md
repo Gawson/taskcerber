@@ -178,10 +178,12 @@ przerysowanie) i licznik prób OTA.
 > orientacji dwie sekundy po tym, jak użytkownik ją zrobił.
 
 > 💡 **Do wykorzystania później:** `T_INT` (GT911) siedzi na **GPIO3**, a `RTC_INT`
-> (PCF8563) na **GPIO2** — oba w domenie RTC. Czyli **dotyk może budzić urządzenie**,
-> gdy powstanie sterownik GT911; `power::shutdown::prepare_for_deep_sleep` ma już na
-> to parametr `keep_touch_alive`. Alarm z PCF8563 może z kolei zastąpić budzenie
-> timerem ESP.
+> (PCF8563) na **GPIO2** — oba w domenie RTC. Czyli **dotyk może budzić urządzenie**;
+> `power::shutdown::prepare_for_deep_sleep` ma już na to parametr `keep_touch_alive`.
+> Sterownik GT911 (`board/gt911.rs`) już jest, ale `T_INT` wykorzystuje wyłącznie
+> jako pin sekwencji resetu — budzenie dotykiem to wciąż rzecz do zrobienia i to ona
+> zdejmie z użytkownika konieczność naciskania BOOT, żeby cokolwiek dotknąć.
+> Alarm z PCF8563 może z kolei zastąpić budzenie timerem ESP.
 
 ---
 

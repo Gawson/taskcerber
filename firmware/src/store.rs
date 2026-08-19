@@ -124,6 +124,36 @@ impl Store {
             .context("zapis hasła")
     }
 
+    pub fn set_ics_url(&mut self, url: &str) -> Result<()> {
+        self.nvs
+            .set_str(KEY_ICS_URL, url)
+            .context("zapis adresu kalendarza")
+    }
+
+    pub fn set_ics_url_secondary(&mut self, url: &str) -> Result<()> {
+        self.nvs
+            .set_str(KEY_ICS_URL_2, url)
+            .context("zapis drugiego adresu kalendarza")
+    }
+
+    pub fn set_timezone(&mut self, tz: &str) -> Result<()> {
+        self.nvs
+            .set_str(KEY_TIMEZONE, tz)
+            .context("zapis strefy czasowej")
+    }
+
+    pub fn set_interval(&mut self, seconds: u32) -> Result<()> {
+        self.nvs
+            .set_u32(KEY_INTERVAL, seconds)
+            .context("zapis odstępu")
+    }
+
+    pub fn set_ota_url(&mut self, url: &str) -> Result<()> {
+        self.nvs
+            .set_str(KEY_OTA_URL, url)
+            .context("zapis adresu manifestu OTA")
+    }
+
     /// Ile razy próbowaliśmy już wgrać którą wersję.
     pub fn ota_attempts(&self) -> Attempts {
         Attempts {

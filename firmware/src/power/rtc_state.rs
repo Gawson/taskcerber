@@ -21,7 +21,7 @@ use log::info;
 
 // Bump przy KAŻDEJ zmianie układu `RtcState`. Stary stan w pamięci RTC ma inny
 // rozmiar i przesunięcia pól; bez zmiany magii zostałby odczytany jako śmieci.
-const MAGIC: u32 = 0x5435_5F33; // "T5_3"
+const MAGIC: u32 = 0x5435_5F34; // "T5_4"
 
 /// Ile razy z rzędu sieć musi zawieść, zanim wydłużymy odstępy.
 pub const FAILURES_BEFORE_BACKOFF: u8 = 3;
@@ -48,6 +48,8 @@ pub struct RtcState {
     pub ap_bssid: [u8; 6],
     /// Czas ostatniego udanego pobrania (unix), 0 = nigdy.
     pub last_success_unix: i64,
+    /// Użytkownik dotknął „odśwież". Patrz [`RtcState::request_fetch`].
+    pub fetch_requested: bool,
 }
 
 // Licznika prób OTA tutaj NIE MA i to jest świadome. Bootloader przeładowuje
@@ -70,6 +72,7 @@ static mut RTC_STATE: RtcState = RtcState {
     ap_channel: 0,
     ap_bssid: [0; 6],
     last_success_unix: 0,
+    fetch_requested: false,
 };
 
 impl RtcState {
@@ -92,6 +95,7 @@ impl RtcState {
                 ap_channel: 0,
                 ap_bssid: [0; 6],
                 last_success_unix: 0,
+                fetch_requested: false,
             };
         }
 
@@ -145,6 +149,20 @@ impl RtcState {
     /// Czy wymusić pełne odświeżenie zamiast szybkiego.
     pub fn needs_full_refresh(&self) -> bool {
         self.fast_refreshes >= crate::epd::FAST_REFRESHES_BEFORE_FULL
+    }
+
+    /// Odnotowuje życzenie natychmiastowego pobrania.
+    ///
+    /// Dotknięcie „odśwież" nie może pobrać danych od razu: radio jest w tym momencie
+    /// wyłączone, a panel ma podniesione szyny — impuls 340 mA nadajnika nałożony na
+    /// 115 mA panelu przez LDO na zużytym ogniwie to brownout, a reset w trakcie
+    /// odświeżania potrafi uszkodzić panel.
+    ///
+    /// Zamiast tego skracamy sen do kilku sekund. Urządzenie zasypia, budzi się
+    /// z czystą sekwencją i pobiera z radiem podniesionym w normalnej kolejności.
+    /// Flaga przeżywa deep sleep, więc wymusza pobranie także w trybie nocnym.
+    pub fn request_fetch(&mut self) {
+        self.fetch_requested = true;
     }
 
     /// Odnotowuje wykonane odświeżenie.

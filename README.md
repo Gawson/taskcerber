@@ -29,7 +29,7 @@ zwykłym `cargo test` — zamiast być debugowane przez wgrywanie i patrzenie na
 Wszystko poniżej działa na zwykłym stabilnym Ruście, bez toolchainu Xtensa.
 
 ```bash
-cargo test                              # 153 testy: render, iCal, dotyk, klawiatura, polityka, OTA
+cargo test                              # 154 testy: render, iCal, dotyk, klawiatura, polityka, OTA
 cargo run -p preview -- all             # zrzuty PNG do out/ (pionowo)
 cargo run -p preview -- all landscape   # to samo poziomo, pliki z sufiksem
 cargo run -p simulator                  # interaktywne okno, mysz jako dotyk
@@ -150,6 +150,21 @@ szeregowej, serwera HTTP ani aplikacji towarzyszącej.
 Wejścia na ekran konfiguracji są dwa: plakietka „skonfiguruj urządzenie" w nagłówku
 (na nieskonfigurowanym urządzeniu odświeżenie i tak nie ma czego pobrać) oraz numer
 wersji w lewym dolnym rogu — dyskretny, ale z obszarem dotykowym wysokim na 44 px.
+
+**Panel reaguje na dotyk tylko wtedy, gdy urządzenie nie śpi**, a śpi prawie zawsze.
+Po narysowaniu ekranu otwiera się okno interaktywne — 20 s, przedłużane każdym
+dotknięciem, 90 s na ekranie konfiguracji. Okno kosztuje ~40 mA przez cały swój
+czas, więc na baterii otwiera się wyłącznie wtedy, gdy coś wskazuje na obecność
+człowieka: naciśnięty **BOOT** (jedyny przycisk na tej płytce zdolny wybudzić
+z deep sleepu), wpięty kabel USB albo urządzenie bez konfiguracji przy zimnym
+starcie. Urządzenie wybudzone timerem rysuje i wraca spać — żeby z nim
+porozmawiać, naciśnij BOOT.
+
+Dotknięcie „odśwież" nie pobiera danych od razu, tylko **skraca sen do pięciu
+sekund**. Pobranie wymaga radia, a radia nie wolno podnosić przy podniesionych
+szynach panelu: impuls 340 mA nadajnika nałożony na 115 mA panelu przez LDO na
+zużytym ogniwie to brownout, a reset w trakcie odświeżania potrafi uszkodzić panel.
+Urządzenie zasypia i wraca ścieżką, w której kolejność jest właściwa.
 
 Sześć pól: `sieć`, `hasło`, `iCal`, `iCal 2`, `strefa`, `OTA`. Wymagane są dwa —
 nazwa sieci i adres kalendarza; są oznaczone kropką na zakładce, a nad klawiaturą
@@ -305,6 +320,18 @@ rejestr konfiguracji portu 1 i zostawia jako wejścia tylko bity 6 i 7. Bit 2 �
 Odzyskanie go jest bezpieczne, bo epdiy z tego bitu nie korzysta: jego stałe `CFG_PIN_*`
 to bity 0, 1, 3, 4, 5, 6 i 7.
 
+**Dotyk i pakowanie mają jedną macierz obrotu.** GT911 raportuje we współrzędnych
+panelu (960×540), a obszary dotykowe są w układzie płótna, które w pionie ma 540×960.
+Przelicznik `Rotation::panel_to_canvas` stoi w `canvas.rs` obok `Gray8::panel_sample`
+i opisuje **to samo** przyklejenie płótna do szkła — pilnuje tego test
+`dotyk_trafia_w_ten_sam_piksel_co_pakowanie`. Rozjazd tych dwóch objawiłby się jako
+dotyk chybiający o obrót, czyli objaw wyglądający na błąd sterownika GT911, a nie
+układu graficznego.
+
+To, czy sam GT911 raportuje w tym samym układzie, w którym panel skanuje, jest
+**założeniem, nie pomiarem**. Jeśli po pierwszym uruchomieniu dotyk trafia w lustro
+albo w zamienione osie, poprawka należy do `board/gt911.rs`, nie do układu.
+
 **epdiy jako komponent, nie własny sterownik.** `epdiy` 2.1.3 zawiera profil
 `lilygo_board_s3`, którego pinout zgadza się ze schematem co do nogi
 (`SDA=39, SCL=40, D0..D7 = 5,6,7,15,16,17,18,8, CKV=48, STH=41, LEH=42, STV=45,
@@ -359,8 +386,8 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 | Boot i render na panelu | **uruchomione** — płytka wstaje, rysuje ekran konfiguracji |
 | Czyszczenie panelu, zatrzaski magistrali | **poprawione i sprawdzone na szkle** — obraz czysty po wybudzeniu |
 | Dwie orientacje | **napisane**, pion sprawdzony na szkle, poziom nie |
-| Ekran konfiguracji i klawiatura | **zweryfikowane na hoście** — 77 testów, mysz w symulatorze; na szkle nie |
-| Sterownik dotyku GT911 | **nie istnieje** — bez niego ekranu konfiguracji nie da się obsłużyć na płytce |
+| Ekran konfiguracji i klawiatura | **zweryfikowane na hoście** — 78 testów, mysz w symulatorze; na szkle nie |
+| Sterownik dotyku GT911 | **napisany, nieuruchomiony** — sekwencja resetu i odczyt punktu; orientacja osi to założenie |
 | Decyzja OTA i polityka zasilania | **zweryfikowane** — 27 testów w `devlogic`, chodzą na hoście |
 | I²C, zasilanie, sieć, dotyk | **nieuruchomione** |
 | OTA — transport | **napisany, nieuruchomiony** — włącza się konsolą, wersje z gita |

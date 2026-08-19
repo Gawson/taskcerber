@@ -70,6 +70,30 @@ impl Rotation {
         }
     }
 
+    /// Przelicza punkt ze współrzędnych **panelu** na współrzędne płótna.
+    ///
+    /// Dotyk przychodzi z GT911 w układzie panelu (960×540), a obszary z
+    /// [`crate::hit::Screen`] są w układzie płótna, które w pionie ma 540×960.
+    /// Bez tego przeliczenia dotknięcie lewego górnego rogu trafia w zupełnie
+    /// inne miejsce układu.
+    ///
+    /// To jest **ta sama macierz**, którą `Gray8::panel_sample` stosuje przy
+    /// pakowaniu — i musi nią być, bo opisuje jedno i to samo przyklejenie płótna
+    /// do szkła. Trzymanie ich obok siebie w jednym pliku jest celowe: rozjazd
+    /// objawiłby się jako dotyk chybiający o obrót, czyli objaw, który wygląda
+    /// na błąd sterownika dotyku, a nie układu graficznego.
+    /// Pilnuje tego test `dotyk_trafia_w_ten_sam_piksel_co_pakowanie`.
+    pub const fn panel_to_canvas(self, px: i32, py: i32) -> (i32, i32) {
+        match self {
+            Self::Landscape if LANDSCAPE_FLIPPED => {
+                (PANEL_WIDTH as i32 - 1 - px, PANEL_HEIGHT as i32 - 1 - py)
+            }
+            Self::Landscape => (px, py),
+            // Płótno pionowe ma szerokość PANEL_HEIGHT.
+            Self::Portrait => (PANEL_HEIGHT as i32 - 1 - py, px),
+        }
+    }
+
     /// Odczyt z NVS. Cokolwiek nierozpoznanego daje wartość domyślną — konfiguracja
     /// z przyszłej wersji nie ma prawa zablokować bootu.
     ///
@@ -488,6 +512,48 @@ mod tests {
         for rotation in ORIENTACJE {
             assert_ne!(rotation.toggled(), rotation);
             assert_eq!(rotation.toggled().toggled(), rotation);
+        }
+    }
+
+    /// Dotyk i pakowanie opisują to samo przyklejenie płótna do szkła. Gdyby się
+    /// rozjechały, objaw wyglądałby na błąd sterownika GT911, a nie układu.
+    #[test]
+    fn dotyk_trafia_w_ten_sam_piksel_co_pakowanie() {
+        for rotation in [Rotation::Portrait, Rotation::Landscape] {
+            let mut c = Gray8::new(rotation);
+            // Każdy piksel dostaje wartość zależną od swojego położenia na PŁÓTNIE.
+            for y in 0..c.height() as i32 {
+                for x in 0..c.width() as i32 {
+                    c.set(x, y, (((x * 7 + y * 13) % 16) * 17) as u8);
+                }
+            }
+
+            let packed = c.to_packed();
+
+            for (px, py) in [
+                (0, 0),
+                (PANEL_WIDTH as i32 - 1, 0),
+                (0, PANEL_HEIGHT as i32 - 1),
+                (PANEL_WIDTH as i32 - 1, PANEL_HEIGHT as i32 - 1),
+                (123, 45),
+                (777, 321),
+            ] {
+                let (x, y) = rotation.panel_to_canvas(px, py);
+                assert!(
+                    x >= 0 && y >= 0 && x < c.width() as i32 && y < c.height() as i32,
+                    "{rotation:?}: panel ({px},{py}) wypada poza płótno jako ({x},{y})"
+                );
+
+                // Ten sam piksel widziany przez spakowany bufor.
+                let byte = packed[py as usize * (PANEL_WIDTH / 2) + (px as usize) / 2];
+                let nibble = if px % 2 == 0 { byte & 0x0F } else { byte >> 4 };
+
+                assert_eq!(
+                    nibble,
+                    c.get(x, y) >> 4,
+                    "{rotation:?}: dotyk z panelu ({px},{py}) wskazuje inny piksel niż pakowanie"
+                );
+            }
         }
     }
 }

@@ -35,7 +35,7 @@ mod store;
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, NaiveDate, NaiveDateTime};
 use dashboard::model::{Battery, DayGroup, NetState, SourceTag};
-use dashboard::{Fonts, Gray8, Model, Rotation};
+use dashboard::{Action, Fonts, Gray8, Model, Rotation};
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::reset::ResetReason;
@@ -67,8 +67,12 @@ const VERSION: &str = env!("T5_VERSION");
 /// Ile dni do przodu pokazujemy.
 const HORIZON_DAYS: i64 = 14;
 
-/// Ile czekamy na kolejne naciśnięcie `S3`, zanim wrócimy do snu.
-const ORIENTATION_WINDOW_MS: u64 = 8_000;
+/// Jak krótko śpimy po dotknięciu „odśwież".
+///
+/// Pobranie wymaga radia, a radia nie wolno podnosić przy podniesionych szynach
+/// panelu. Zamiast tego zasypiamy na chwilę i wracamy normalną ścieżką, w której
+/// kolejność jest właściwa.
+const FETCH_SOON_S: u64 = 5;
 
 esp_idf_svc::sys::esp_app_desc!();
 
@@ -170,6 +174,11 @@ fn run(mut state: RtcState) -> Result<u64> {
     );
 
     // --- 5. Sieć ---------------------------------------------------------------
+    let requested = std::mem::take(&mut state.fetch_requested);
+    if requested {
+        info!("pobranie na życzenie z poprzedniego cyklu");
+    }
+
     let mut net_state = NetState::Ok;
     let mut events = Vec::new();
     let mut content_crc = state.last_content_crc;
@@ -178,7 +187,10 @@ fn run(mut state: RtcState) -> Result<u64> {
     if !config.is_provisioned() {
         warn!("urządzenie nieskonfigurowane — pokazuję ekran konfiguracji");
         net_state = NetState::NeedsAuth;
-    } else if policy.should_fetch(mode) && !matches!(mode, Mode::Night) {
+    // Dotknięcie „odśwież" w poprzednim cyklu wymusza pobranie niezależnie od trybu,
+    // także w nocy. Flagę zdejmujemy tutaj, a nie po udanym pobraniu: gdyby sieć
+    // zawiodła, powtarzanie życzenia sprzed godziny nie jest już tym, o co ktoś prosił.
+    } else if requested || (policy.should_fetch(mode) && !matches!(mode, Mode::Night)) {
         match fetch_everything(
             peripherals.modem,
             sysloop,
@@ -263,30 +275,61 @@ fn run(mut state: RtcState) -> Result<u64> {
         } else {
             provisioning_model(now)
         };
-        if let Err(e) = paint(&mut epd, &model, &mut state, temperature, rotation) {
-            // Nieudane malowanie nie zwalnia nas z poprawnego zaśnięcia.
-            error!("rysowanie nie powiodło się: {e:#}");
-        }
+        // Pierwsze rysowanie w tym wybudzeniu MUSI być pełne — `back_fb` epdiy
+        // powstał przed chwilą wyzerowany do bieli i nie wie nic o tym, co zostało
+        // na szkle. Dopiero kolejne, w oknie interaktywnym, mogą być szybkie.
+        let screen = match paint(
+            &mut epd,
+            &model,
+            &mut state,
+            temperature,
+            rotation,
+            Refresh::Full,
+        ) {
+            Ok(screen) => screen,
+            Err(e) => {
+                // Nieudane malowanie nie zwalnia nas z poprawnego zaśnięcia.
+                error!("rysowanie nie powiodło się: {e:#}");
+                dashboard::Screen::default()
+            }
+        };
 
-        if woke_by_button {
-            orientation_loop(
+        let boot_count = state.boot_count;
+        if wants_interaction(
+            config.is_provisioned(),
+            power_status.usb_present,
+            boot_count,
+            woke_by_button,
+        ) {
+            let changed = interactive_loop(
                 &mut epd,
+                &bus,
                 &hw,
                 &mut store,
-                &model,
                 &mut state,
+                &model,
+                screen,
                 temperature,
                 rotation,
+                boot_count <= 1,
             );
+            if changed {
+                // Świeżo wpisana konfiguracja ma zadziałać teraz, a nie za pół godziny.
+                info!("konfiguracja zmieniona — pobieram przy najbliższym wybudzeniu");
+                state.request_fetch();
+            }
         }
     } else {
         info!("treść bez zmian — pomijam odświeżenie panelu");
     }
 
     // --- 7. Sekwencja wyłączania i sen -----------------------------------------
-    let base = policy.sleep_seconds(mode, now);
-    let sleep_s = base.saturating_mul(state.backoff_multiplier());
-    let sleep_s = power::align_to_minute(now, sleep_s);
+    let sleep_s = if state.fetch_requested {
+        FETCH_SOON_S
+    } else {
+        let base = policy.sleep_seconds(mode, now);
+        power::align_to_minute(now, base.saturating_mul(state.backoff_multiplier()))
+    };
 
     state.last_known_unix = net::time::now_unix();
     state.store();
@@ -448,21 +491,34 @@ fn group_by_day(events: Vec<dashboard::model::CalEvent>) -> Vec<DayGroup> {
     groups
 }
 
-/// Renderuje i wypycha na panel.
+/// Renderuje agendę i wypycha ją na panel, oddając obszary dotykowe.
 fn paint(
     epd: &mut Epd,
     model: &Model,
     state: &mut RtcState,
     temperature_c: i32,
     rotation: Rotation,
-) -> Result<()> {
+    mode: Refresh,
+) -> Result<dashboard::Screen> {
     let fonts = Fonts::embedded();
     let mut canvas = Gray8::new(rotation);
 
     let started = std::time::Instant::now();
-    dashboard::render(model, &fonts, &mut canvas);
+    let screen = dashboard::render(model, &fonts, &mut canvas);
     info!("render: {} ms", started.elapsed().as_millis());
 
+    present(epd, &canvas, state, temperature_c, mode)?;
+    Ok(screen)
+}
+
+/// Wypycha gotowe płótno na panel.
+fn present(
+    epd: &mut Epd,
+    canvas: &Gray8,
+    state: &mut RtcState,
+    temperature_c: i32,
+    mode: Refresh,
+) -> Result<()> {
     // Porównanie idzie z wymiarami PANELU, nie płótna. Płótno jest pionowe (540×960),
     // panel skanuje poziomo (960×540) — obrót robi `pack4`.
     let (w, h) = epd.dimensions();
@@ -479,7 +535,7 @@ fn paint(
         );
     }
 
-    // Zawsze pełne odświeżenie, i to nie z ostrożności.
+    // PIERWSZE rysowanie w danym wybudzeniu musi być pełne, i to nie z ostrożności.
     //
     // Każde wybudzenie to świeży boot: deep sleep gasi PSRAM, więc `epd_hl_init`
     // alokuje `back_fb` od nowa i zeruje go do bieli. epdiy nie ma więc żadnej wiedzy
@@ -487,20 +543,19 @@ fn paint(
     // założenia. Bez czyszczenia stary tusz zostaje wszędzie tam, gdzie nowa klatka
     // jest biała. Szczegóły i cała mechanika: `Epd::present`.
     //
-    // `Refresh::Fast` odżyje dopiero przy rysowaniu w obrębie jednego wybudzenia
-    // (dotyk, ekran szczegółów) — wtedy `back_fb` opisuje prawdę i licznik
-    // `RtcState::needs_full_refresh` zacznie mieć sens.
-    let mode = Refresh::Full;
-
+    // `Refresh::Fast` jest poprawne dopiero dla DRUGIEGO i kolejnego rysowania
+    // w obrębie tego samego wybudzenia — wtedy `back_fb` opisuje prawdę. Dokładnie
+    // to robi okno interaktywne: wpisany znak, zmiana strony, ekran szczegółów.
+    // Za to, żeby nie zacząć od `Fast`, odpowiada wołający.
     let started = std::time::Instant::now();
-    let result = epd.present(&canvas, mode, temperature_c);
+    let result = epd.present(canvas, mode, temperature_c);
     info!("odświeżenie {mode:?}: {} ms", started.elapsed().as_millis());
 
     // Cokolwiek się stało, szyny mają zejść.
     epd.ensure_powered_off();
     result?;
 
-    state.record_refresh(true);
+    state.record_refresh(mode == Refresh::Full);
     Ok(())
 }
 
@@ -513,9 +568,9 @@ fn provisioning_model(now: NaiveDateTime) -> Model {
     model.firmware = format!("t5s3pro {VERSION}");
     model.net = NetState::NeedsAuth;
     model.tiles = vec![
-        dashboard::model::Tile::new("krok 1", "podłącz USB"),
-        dashboard::model::Tile::new("krok 2", "otwórz stronę"),
-        dashboard::model::Tile::new("krok 3", "wpisz WiFi"),
+        dashboard::model::Tile::new("krok 1", "dotknij ekranu"),
+        dashboard::model::Tile::new("krok 2", "wpisz sieć"),
+        dashboard::model::Tile::new("krok 3", "wpisz adres iCal"),
     ];
     model
 }
@@ -532,29 +587,82 @@ fn woken_by_button() -> bool {
     cause == esp_idf_svc::sys::esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT1
 }
 
-/// Po wybudzeniu przyciskiem zostajemy chwilę na nogach, żeby dało się obrócić ekran.
+/// Ile milisekund bez zdarzenia zamyka okno interaktywne agendy.
+const IDLE_MS: u64 = 20_000;
+
+/// To samo dla ekranu konfiguracji. Dłużej, bo wstukanie 120-znakowego adresu iCal
+/// to kilka minut, a przerwa na sprawdzenie hasła w telefonie jest normalna.
+const SETUP_IDLE_MS: u64 = 90_000;
+
+/// Po tylu nieudanych odczytach z rzędu uznajemy kontroler dotyku za nieobecny.
+/// Odpytywanie martwej magistrali przez całe okno to czysto stracona energia.
+const TOUCH_ERRORS_BEFORE_GIVING_UP: u8 = 8;
+
+/// Ile znaków wolno wpisać między pełnymi odświeżeniami.
 ///
-/// Podział ról między przyciskami nie jest wyborem projektowym, tylko konsekwencją
-/// sprzętu:
+/// Każde naciśnięcie klawisza to odświeżenie DU (~0,28 s), które zostawia duchy.
+/// Ten sam próg co dla agendy — patrz [`epd::FAST_REFRESHES_BEFORE_FULL`].
+const EDITS_BEFORE_FULL: u8 = epd::FAST_REFRESHES_BEFORE_FULL;
+
+/// Czy po narysowaniu ekranu warto zostać na jawie i czekać na dotyk.
+///
+/// Okno kosztuje ~40 mA przez cały swój czas, więc na baterii otwiera się tylko
+/// wtedy, gdy coś wskazuje na obecność człowieka: naciśnięty przycisk, wpięty kabel
+/// albo urządzenie bez konfiguracji przy zimnym starcie — bo inaczej nie ma jak tej
+/// konfiguracji wprowadzić.
+///
+/// Urządzenie bez konfiguracji na baterii, wybudzone timerem, okna **nie** dostaje.
+/// Rysuje ekran startowy i wraca spać; drogą wejścia jest wtedy przycisk BOOT, który
+/// jako jedyny na tej płytce potrafi wybudzić z deep sleepu.
+fn wants_interaction(provisioned: bool, usb: bool, boot_count: u32, woke_by_button: bool) -> bool {
+    woke_by_button || usb || (!provisioned && boot_count <= 1)
+}
+
+/// Wykrywanie zbocza dotyku.
+///
+/// GT911 raportuje palec **przy każdym cyklu skanowania**, więc bez tego
+/// przytrzymanie klawisza wpisałoby go kilkadziesiąt razy.
+#[derive(Default)]
+struct FingerEdge {
+    down: bool,
+}
+
+impl FingerEdge {
+    /// Zwraca punkt wyłącznie w momencie położenia palca na szkle.
+    fn press(&mut self, touch: &board::gt911::Gt911) -> Result<Option<board::gt911::TouchPoint>> {
+        use board::gt911::Report;
+        match touch.read()? {
+            Report::Down(point) if !self.down => {
+                self.down = true;
+                Ok(Some(point))
+            }
+            Report::Down(_) => Ok(None),
+            Report::Up => {
+                self.down = false;
+                Ok(None)
+            }
+            Report::Idle => Ok(None),
+        }
+    }
+}
+
+/// Okno, w którym urządzenie reaguje na dotyk i na przycisk.
+///
+/// # Podział ról między przyciskami a dotykiem
 ///
 /// * **BOOT (GPIO0)** budzi z deep sleepu. Jest pinem RTC, więc może być źródłem
 ///   `ext1` — i jest jedynym przyciskiem na tej płytce, który to potrafi.
 /// * **S3 (PCA9535 `IO1_2`, aktywny niskim)** obraca ekran. Wisi na ekspanderze I²C,
-///   a INT ekspandera idzie na **GPIO38**, który na ESP32-S3 **nie jest pinem RTC**
-///   (RTC to GPIO0–21). Deep sleep nie ma go jak zauważyć, więc `S3` daje się odczytać
-///   wyłącznie na jawie.
+///   a INT ekspandera idzie na **GPIO38**, który na ESP32-S3 **nie jest pinem RTC**,
+///   więc daje się odczytać wyłącznie na jawie.
+/// * **Dotyk (GT911)** robi resztę: strony, szczegóły, wejście w konfigurację.
+///
+/// Obrót celowo **nie** ma przycisku na ekranie: to ustawienie sprzętowe, a nie
+/// element treści, i gdyby był kafelkiem, zabierałby miejsce w każdym układzie.
 ///
 /// Uwaga na opis na płytce: nadruk przy custom buttonie sugeruje `IO48`, ale GPIO48
-/// to `EP_CKV` — zegar bramki panelu, sterowany przez RMT. Mapowanie na `IO1_2`
-/// pochodzi z `docs/hardware.md`, zgodnie w trzech źródłach vendora.
-///
-/// Pozostałe przyciski odpadają: `PWR` należy do PMIC-a, `RESET` restartuje układ,
-/// a `HOME` pod ekranem to klawisz kontrolera dotyku GT911 — bez sterownika dotyku
-/// nie ma go jak odczytać.
-///
-/// Stąd układ: BOOT budzi, custom przełącza orientację. Przez
-/// [`ORIENTATION_WINDOW_MS`] każde naciśnięcie customa przestawia pion ↔ poziom
-/// i przerysowuje; okno startuje od nowa po każdym przełączeniu.
+/// to `EP_CKV` — zegar bramki panelu. Mapowanie na `IO1_2` pochodzi z
+/// `docs/hardware.md`, zgodnie w trzech źródłach vendora.
 ///
 /// # BOOT tu nie występuje, i to jest świadome
 ///
@@ -565,29 +673,32 @@ fn woken_by_button() -> bool {
 /// Licznik przytrzymania dobijał więc do progu przy każdym wybudzeniu i przestawiał
 /// orientację z powrotem, jakieś dwie sekundy po tym, jak użytkownik ją zmienił.
 ///
-/// Odzyskanie GPIO0 wymagałoby `rtc_gpio_deinit(0)` przed konfiguracją jako wejście.
-/// Nie robimy tego, bo custom button działa, a drugi przycisk robiący to samo jest
-/// tylko drugą rzeczą, która może się zepsuć.
+/// Zwraca `true`, jeśli konfiguracja się zmieniła — wołający wie wtedy, że warto
+/// przy najbliższej okazji sięgnąć po sieć.
 #[allow(clippy::too_many_arguments)]
-fn orientation_loop(
+fn interactive_loop(
     epd: &mut Epd,
+    bus: &I2cBus,
     hw: &Board,
     store: &mut Store,
-    model: &Model,
     state: &mut RtcState,
+    model: &Model,
+    mut screen: dashboard::Screen,
     temperature_c: i32,
     mut rotation: Rotation,
-) {
+    verbose: bool,
+) -> bool {
     use std::time::{Duration, Instant};
 
-    info!("wybudzenie przyciskiem — {ORIENTATION_WINDOW_MS} ms na obrót ekranu (S3)");
-
-    if let Ok((_, p1)) = hw.expander.read_inputs() {
-        info!("okno obrotu: port1 ekspandera = {p1:#010b}");
-    }
-
-    let mut deadline = Instant::now() + Duration::from_millis(ORIENTATION_WINDOW_MS);
+    let touch = board::gt911::open(bus, verbose);
+    let mut finger = FingerEdge::default();
     let mut custom = Button::new(hw.expander.button_pressed().unwrap_or(false));
+    let mut model = model.clone();
+    let mut errors = 0u8;
+    let mut changed = false;
+
+    info!("okno interaktywne: {IDLE_MS} ms");
+    let mut deadline = Instant::now() + Duration::from_millis(IDLE_MS);
 
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
@@ -595,17 +706,231 @@ fn orientation_loop(
         if custom.pressed(hw.expander.button_pressed().unwrap_or(false)) {
             rotation = rotation.toggled();
             info!("obrót ekranu -> {rotation:?}");
-
             if let Err(e) = store.set_rotation(rotation) {
                 warn!("nie mogę zapisać obrotu: {e:#}");
             }
-            if let Err(e) = paint(epd, model, state, temperature_c, rotation) {
-                error!("przerysowanie po obrocie nie powiodło się: {e:#}");
-            }
+            screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Full);
+            deadline = Instant::now() + Duration::from_millis(IDLE_MS);
+            continue;
+        }
 
-            deadline = Instant::now() + Duration::from_millis(ORIENTATION_WINDOW_MS);
+        let Some(touch) = touch.as_ref() else {
+            continue;
+        };
+
+        let point = match finger.press(touch) {
+            Ok(point) => {
+                errors = 0;
+                point
+            }
+            Err(e) => {
+                errors += 1;
+                if errors >= TOUCH_ERRORS_BEFORE_GIVING_UP {
+                    warn!("dotyk nie odpowiada, zamykam okno: {e:#}");
+                    break;
+                }
+                continue;
+            }
+        };
+        let Some(point) = point else {
+            continue;
+        };
+
+        // Dotyk przychodzi w układzie PANELU, obszary są w układzie płótna.
+        let (x, y) = rotation.panel_to_canvas(point.x, point.y);
+        let Some(action) = screen.hit(x, y) else {
+            continue;
+        };
+        info!("dotyk ({x}, {y}) -> {action:?}");
+        deadline = Instant::now() + Duration::from_millis(IDLE_MS);
+
+        match action {
+            Action::OpenSetup => {
+                changed |= setup_screen(epd, touch, store, state, temperature_c, rotation);
+                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Full);
+            }
+            Action::NextPage => {
+                model.page += 1;
+                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+            }
+            Action::PrevPage => {
+                model.page = model.page.saturating_sub(1);
+                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+            }
+            Action::ShowEvent(i) => {
+                model.focus = Some(i);
+                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+            }
+            Action::Back => {
+                if model.focus.take().is_some() {
+                    screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+                }
+            }
+            Action::RefreshNow => {
+                // Pobranie wymaga radia, a radio jest już wyłączone i panel ma
+                // podniesione szyny. Zamiast ryzykować brownout, zapisujemy życzenie:
+                // najbliższe wybudzenie sięgnie po sieć niezależnie od trybu.
+                info!("odświeżenie na życzenie — przy najbliższym wybudzeniu");
+                state.request_fetch();
+            }
+            // Akcje ekranu konfiguracji nie mają tu obszarów dotykowych.
+            _ => {}
         }
     }
+
+    changed
+}
+
+/// Ekran konfiguracji: jedyna droga wprowadzania danych do urządzenia.
+///
+/// Zostajemy na jawie, dopóki użytkownik nie naciśnie „zapisz" albo nie przestanie
+/// dotykać na [`SETUP_IDLE_MS`]. Zwraca `true`, jeśli cokolwiek zapisano.
+fn setup_screen(
+    epd: &mut Epd,
+    touch: &board::gt911::Gt911,
+    store: &mut Store,
+    state: &mut RtcState,
+    temperature_c: i32,
+    rotation: Rotation,
+) -> bool {
+    use dashboard::setup::{Applied, Field, Setup};
+    use std::time::{Duration, Instant};
+
+    let config = store.load();
+    let mut setup = Setup::new();
+    setup.set(Field::Ssid, config.ssid.clone().unwrap_or_default());
+    setup.set(Field::Password, config.password.clone().unwrap_or_default());
+    setup.set(Field::Ics, config.ics_url.clone().unwrap_or_default());
+    setup.set(
+        Field::Ics2,
+        config.ics_url_secondary.clone().unwrap_or_default(),
+    );
+    setup.set(Field::Timezone, config.timezone.clone().unwrap_or_default());
+    setup.set(Field::Ota, config.ota_url.clone().unwrap_or_default());
+
+    info!("ekran konfiguracji");
+    let mut screen = repaint_setup(epd, &setup, state, temperature_c, rotation, Refresh::Full);
+
+    let mut finger = FingerEdge::default();
+    let mut edits = 0u8;
+    let mut errors = 0u8;
+    let mut deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
+
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(SAMPLE_MS));
+
+        let point = match finger.press(touch) {
+            Ok(point) => {
+                errors = 0;
+                point
+            }
+            Err(e) => {
+                errors += 1;
+                if errors >= TOUCH_ERRORS_BEFORE_GIVING_UP {
+                    warn!("dotyk nie odpowiada, zamykam konfigurację: {e:#}");
+                    return false;
+                }
+                continue;
+            }
+        };
+        let Some(point) = point else {
+            continue;
+        };
+
+        let (x, y) = rotation.panel_to_canvas(point.x, point.y);
+        let Some(action) = screen.hit(x, y) else {
+            continue;
+        };
+        deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
+
+        match setup.apply(action) {
+            Applied::Ignored => {}
+            Applied::Save => {
+                let saved = save_setup(store, &setup);
+                info!("konfiguracja zapisana: {saved}");
+                return saved;
+            }
+            Applied::Edited | Applied::Relayout => {
+                let mode = if edits >= EDITS_BEFORE_FULL {
+                    edits = 0;
+                    Refresh::Full
+                } else {
+                    edits += 1;
+                    Refresh::Fast
+                };
+                screen = repaint_setup(epd, &setup, state, temperature_c, rotation, mode);
+            }
+        }
+    }
+
+    info!("konfiguracja: brak aktywności, wracam bez zapisu");
+    false
+}
+
+/// Przenosi zawartość ekranu do NVS.
+///
+/// Puste pole zapisujemy jako pusty łańcuch, a nie pomijamy: użytkownik, który
+/// wyczyścił drugi kalendarz, chce go mieć wyczyszczonego. `Store::load` i tak
+/// traktuje pusty łańcuch jak brak wartości.
+fn save_setup(store: &mut Store, setup: &dashboard::setup::Setup) -> bool {
+    use dashboard::setup::Field;
+
+    let writes: [(Field, fn(&mut Store, &str) -> Result<()>); 6] = [
+        (Field::Ssid, |s, v| s.set_ssid(v)),
+        (Field::Password, |s, v| s.set_password(v)),
+        (Field::Ics, |s, v| s.set_ics_url(v)),
+        (Field::Ics2, |s, v| s.set_ics_url_secondary(v)),
+        (Field::Timezone, |s, v| s.set_timezone(v)),
+        (Field::Ota, |s, v| s.set_ota_url(v)),
+    ];
+
+    let mut ok = true;
+    for (field, write) in writes {
+        if let Err(e) = write(store, setup.value(field)) {
+            warn!("nie mogę zapisać pola {}: {e:#}", field.tab());
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// Przerysowanie agendy z logowaniem błędu zamiast przerywania pętli.
+///
+/// W oknie interaktywnym nieudane odświeżenie nie jest powodem, żeby przestać
+/// reagować — obszary dotykowe z poprzedniej klatki wciąż są prawdziwe.
+fn repaint(
+    epd: &mut Epd,
+    model: &Model,
+    state: &mut RtcState,
+    temperature_c: i32,
+    rotation: Rotation,
+    mode: Refresh,
+) -> dashboard::Screen {
+    match paint(epd, model, state, temperature_c, rotation, mode) {
+        Ok(screen) => screen,
+        Err(e) => {
+            error!("przerysowanie nie powiodło się: {e:#}");
+            dashboard::Screen::default()
+        }
+    }
+}
+
+fn repaint_setup(
+    epd: &mut Epd,
+    setup: &dashboard::setup::Setup,
+    state: &mut RtcState,
+    temperature_c: i32,
+    rotation: Rotation,
+    mode: Refresh,
+) -> dashboard::Screen {
+    let fonts = Fonts::embedded();
+    let mut canvas = Gray8::new(rotation);
+    let screen = dashboard::render_setup(setup, &fonts, &mut canvas);
+
+    if let Err(e) = present(epd, &canvas, state, temperature_c, mode) {
+        error!("rysowanie konfiguracji nie powiodło się: {e:#}");
+    }
+    screen
 }
 
 /// Odstęp próbkowania przycisków.

@@ -5,6 +5,7 @@
 
 pub mod bq25896;
 pub mod bq27220;
+pub mod gt911;
 pub mod pca9535;
 pub mod pcf8563;
 

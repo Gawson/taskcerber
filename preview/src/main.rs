@@ -248,9 +248,9 @@ fn scenario_provisioning() -> Model {
     m.firmware = "t5s3pro 0.1.0".to_string();
     m.net = NetState::NeedsAuth;
     m.tiles = vec![
-        Tile::new("krok 1", "podłącz USB"),
-        Tile::new("krok 2", "otwórz stronę"),
-        Tile::new("krok 3", "wpisz WiFi"),
+        Tile::new("krok 1", "dotknij ekranu"),
+        Tile::new("krok 2", "wpisz sieć"),
+        Tile::new("krok 3", "wpisz adres iCal"),
     ];
     m
 }
