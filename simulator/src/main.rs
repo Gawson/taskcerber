@@ -124,6 +124,10 @@ fn main() {
             .into_iter()
             .for_each(|key| match key {
                 Key::Space => dev.apply(Action::RefreshNow),
+                // Na urządzeniu wchodzi się w konfigurację dotykiem (wersja w stopce
+                // albo plakietka „skonfiguruj urządzenie"); tutaj skrótem, bo
+                // trafianie myszą w 15-pikselowy napis jest testem cierpliwości.
+                Key::K => dev.apply(Action::OpenSetup),
                 Key::Right => dev.apply(Action::NextPage),
                 Key::Left => dev.apply(Action::PrevPage),
                 Key::Escape => dev.apply(Action::Back),
@@ -287,10 +291,15 @@ fn draw(
         buffer[chrome_top * win_w + x] = 0x00_44_44_40;
     }
 
+    // Ekran konfiguracji nie ma paginacji — pokazywanie „strona 1/1" sugerowałoby,
+    // że strzałki coś tam robią.
+    let gdzie = if dev.setup_open() {
+        "konfiguracja".to_string()
+    } else {
+        format!("strona {}/{}", dev.screen.page + 1, dev.screen.pages.max(1))
+    };
     let line1 = format!(
-        "strona {}/{}   {}   render {:.1} ms   pełnych {}  szybkich {}",
-        dev.screen.page + 1,
-        dev.screen.pages.max(1),
+        "{gdzie}   {}   render {:.1} ms   pełnych {}  szybkich {}",
         match dev.refresh_mode() {
             Refresh::Full => "GC16",
             Refresh::Fast => "DU",
@@ -301,9 +310,12 @@ fn draw(
     );
     let line2 = match last_action {
         Some(a) => format!("{source}   ·   ostatnia akcja: {a:?}"),
-        None => {
-            format!("{source}   ·   spacja=odśwież  ←→=strony  B=bateria  N=sieć  S=PNG  Q=wyjście")
+        None if dev.setup_open() => {
+            format!("{source}   ·   stukaj w klawisze myszą   ·   zapisz=wyjście z konfiguracji")
         }
+        None => format!(
+            "{source}   ·   spacja=odśwież  ←→=strony  B=bateria  N=sieć  K=konfiguracja  S=PNG  Q=wyjście"
+        ),
     };
 
     text::draw(buffer, win_w, 12, chrome_top + 14, &line1, 0x00_E8_E6_DF);
@@ -377,7 +389,12 @@ Klawiatura:
   ← →     zmiana strony         N  cykl stanu sieci
   Esc     powrót ze szczegółów  G  duchy wł/wył
   R       pobierz ponownie      S  zrzut PNG
-  1-4     scenariusze           Q  wyjście";
+  K       ekran konfiguracji    Q  wyjście
+  1-4     scenariusze
+
+Ekran konfiguracji obsługuje się myszą jak palcem — to te same regiony dotykowe,
+które dostanie firmware z GT911. Na urządzeniu wchodzi się w niego dotknięciem
+wersji w stopce albo plakietki \"skonfiguruj urządzenie\".";
 
 /// Minimalny renderer tekstu 5x7 dla paska przyrządów.
 ///

@@ -6,6 +6,7 @@
 //! bez tego, żeby zadziałał w obu miejscach.
 
 use crate::canvas::Rect;
+use crate::setup::Field;
 
 /// Co się dzieje po dotknięciu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,26 @@ pub enum Action {
     ShowEvent(usize),
     /// Wróć do widoku agendy.
     Back,
+    /// Otwórz ekran konfiguracji.
+    OpenSetup,
+
+    // --- ekran konfiguracji -------------------------------------------------
+    // Znak jest w akcji, a nie w indeksie klawisza, i to jest celowe: układ
+    // klawiatury zmienia się między stronami i przy `⇧`, a obszar dotykowy ma
+    // znaczyć to, co widać na klawiszu w momencie rysowania. Indeks wymagałby,
+    // żeby odbiorca znał układ — czyli drugiej kopii tej samej wiedzy.
+    /// Dopisz znak do edytowanego pola.
+    Key(char),
+    /// Skasuj ostatni znak.
+    Backspace,
+    /// Przełącz `⇧`: wyłączony -> jednorazowy -> blokada.
+    Caps,
+    /// Przełącz stronę klawiatury (litery / cyfry i symbole).
+    KeyPage,
+    /// Przejdź do edycji wskazanego pola.
+    Focus(Field),
+    /// Zapisz konfigurację i wyjdź.
+    Save,
 }
 
 /// Prostokąt reagujący na dotyk.

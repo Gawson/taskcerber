@@ -66,6 +66,22 @@ impl<'a> Fonts<'a> {
         }
     }
 
+    /// Czy krój ma glif dla tego znaku.
+    ///
+    /// **Brakujący glif rysuje się jako NIC** — nie ma tofu, nie ma pustego
+    /// prostokąta, nie ma ostrzeżenia. `ab_glyph` zwraca `None` z `outline_glyph`
+    /// i pętla rysująca po prostu nic nie robi, więc klawisz wygląda na pusty,
+    /// a układ jest poprawny co do piksela.
+    ///
+    /// To nie jest hipotetyczne: `tools/subset-fonts.sh` wymienia w zakresie
+    /// `U+2190-2193` (strzałki), ale źródłowy Noto Sans ich nie ma, więc pyftsubset
+    /// je po cichu pomija. Klawisz kasowania z napisem „←" był pustym prostokątem.
+    /// Pilnuje tego teraz test `wszystkie_znaki_interfejsu_maja_glify`.
+    pub fn has_glyph(&self, ch: char, weight: Weight) -> bool {
+        use ab_glyph::Font as _;
+        self.face(weight).glyph_id(ch).0 != 0
+    }
+
     /// Szerokość napisu w pikselach, z kerningiem — bez rysowania czegokolwiek.
     pub fn measure(&self, s: &str, size: f32, weight: Weight) -> f32 {
         let scaled = self.face(weight).as_scaled(PxScale::from(size));

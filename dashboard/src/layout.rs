@@ -18,8 +18,12 @@ use crate::model::{
     data_dzien_miesiac, dzien_skrot, godzina, naglowek_dnia, za_ile, Battery, CalEvent, Model,
     NetState, SourceTag,
 };
+// `Page` w tym module to strona AGENDY (paginacja). Strona klawiatury
+// przychodzi pod aliasem, żeby te dwa pojęcia nie udawały jednego.
+use crate::setup::Page as KeyboardPage;
+use crate::setup::{Caps, Field, Setup};
 use crate::shapes::{
-    chevron_left, chevron_right, fill_circle, fill_round_rect, hline, stroke_round_rect,
+    chevron_left, chevron_right, fill_circle, fill_round_rect, hline, stroke_round_rect, vline,
 };
 use crate::text::{Align, Fonts, Weight};
 
@@ -305,10 +309,18 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         stroke_round_rect(c, pill, 8.0, 2, BLACK);
     }
 
-    // Dotknięcie paska statusu wymusza odświeżenie.
+    // Dotknięcie paska statusu wymusza odświeżenie — z jednym wyjątkiem.
+    // Na nieskonfigurowanym urządzeniu plakietka mówi „skonfiguruj urządzenie",
+    // więc jedyne sensowne, co może zrobić, to otworzyć konfigurację. Odświeżenie
+    // i tak nie ma czego pobrać, bo nie ma ani sieci, ani adresu kalendarza.
+    let pill_action = if matches!(model.net, NetState::NeedsAuth) {
+        Action::OpenSetup
+    } else {
+        Action::RefreshNow
+    };
     screen.hits.push(HitRegion::new(
         Rect::new(pill.x - 10, pill.y - 6, pill.w + 20, pill.h + 12),
-        Action::RefreshNow,
+        pill_action,
     ));
 
     hline(c, g.margin, g.header_h, g.w - 2 * g.margin, 3, BLACK);
@@ -773,7 +785,7 @@ fn draw_footer(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
     // a w poziomie stopka jest o 26 px niższa i te dwa elementy na siebie wchodziły.
     // Po lewej jest wolno w obu orientacjach.
     if !model.firmware.is_empty() {
-        fonts.draw(
+        let w = fonts.draw(
             c,
             &model.firmware,
             g.margin as f32,
@@ -783,6 +795,16 @@ fn draw_footer(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
             GRAY_80,
             Align::Left,
         );
+
+        // Wejście do konfiguracji na urządzeniu, które JEST już skonfigurowane —
+        // inaczej zmiana hasła WiFi wymagałaby kasowania NVS przez przeflashowanie.
+        // Obszar jest znacznie wyższy niż napis, bo piętnastopikselowy tekst nie
+        // jest celem dla palca; sam napis zostaje dyskretny, żeby nie wyglądał
+        // jak przycisk do przypadkowego naciśnięcia.
+        screen.hits.push(HitRegion::new(
+            Rect::new(g.margin - 10, g.h - 46, w as i32 + 20, 44),
+            Action::OpenSetup,
+        ));
     }
 }
 
@@ -919,6 +941,509 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ekran konfiguracji
+// ---------------------------------------------------------------------------
+
+/// Klawiatura jest dosunięta do dolnej krawędzi i rośnie w górę.
+///
+/// Strony mają różną liczbę wierszy (litery 3, symbole 4), więc kotwiczenie od góry
+/// przesuwałoby cały pasek przy przełączeniu strony — a to na e-papierze jest
+/// przemalowaniem połowy ekranu zamiast jednego wiersza.
+const KB_MARGIN: i32 = 16;
+const KB_GAP: i32 = 6;
+
+/// Ile najwyżej wysokości ekranu wolno zająć klawiaturze.
+const KB_MAX_HEIGHT_PCT: i32 = 42;
+
+/// Klawisz niższy niż to jest nietrafialny palcem, wyższy — marnuje ekran.
+/// Przy 234 DPI panelu 44 px to niecałe 5 mm, czyli tyle, co klawisz w telefonie.
+const KEY_H_MIN: i32 = 44;
+const KEY_H_MAX: i32 = 78;
+
+/// Wymiary ekranu konfiguracji, policzone dla konkretnego płótna.
+struct SetupGeom {
+    w: i32,
+    gap: i32,
+    /// Szerokość klawisza w wierszu dziesięcioklawiszowym. Węższe wiersze centrujemy.
+    unit: i32,
+    key_h: i32,
+    kb_top: i32,
+    /// W poziomie nad klawiaturą zostaje ~280 px i blok treści musi się ścisnąć.
+    compact: bool,
+    content_margin: i32,
+    title_base: f32,
+    rule_y: i32,
+    tabs_y: i32,
+    tab_h: i32,
+    label_base: f32,
+    box_y: i32,
+    box_h: i32,
+    hint_base: f32,
+    /// Pas na listę pól. Dolna granica jest liczona dla NAJWYŻSZEJ klawiatury,
+    /// a nie dla obecnie pokazanej — patrz komentarz przy jej wyliczeniu.
+    summary_top: i32,
+    summary_bottom: i32,
+}
+
+impl SetupGeom {
+    fn of(c: &Gray8, setup: &Setup) -> Self {
+        let w = c.width() as i32;
+        let h = c.height() as i32;
+        let rows = setup.page().rows().len() as i32 + 1; // wiersze znakowe + pasek
+
+        let key_h = ((h * KB_MAX_HEIGHT_PCT / 100 - (rows - 1) * KB_GAP) / rows)
+            .clamp(KEY_H_MIN, KEY_H_MAX);
+        let kb_h = rows * key_h + (rows - 1) * KB_GAP;
+        let kb_top = h - KB_MARGIN - kb_h;
+
+        let compact = kb_top < 320;
+
+        let title_base = if compact { 38.0 } else { 56.0 };
+        let rule_y = if compact { 52 } else { 78 };
+        let tabs_y = rule_y + if compact { 12 } else { 22 };
+        let tab_h = if compact { 44 } else { 56 };
+        let label_base = (tabs_y + tab_h) as f32 + if compact { 26.0 } else { 36.0 };
+        let box_y = label_base as i32 + if compact { 10 } else { 14 };
+        let box_h = if compact { 54 } else { 70 };
+        let hint_base = (box_y + box_h) as f32 + if compact { 22.0 } else { 30.0 };
+
+        // Dolna granica listy pól NIE zależy od tego, która strona klawiatury jest
+        // pokazana. Gdyby zależała, przełączenie na symbole — o wiersz wyższe —
+        // kazałoby liście zniknąć, a na e-papierze zniknięcie bloku to przemalowanie
+        // ćwiartki ekranu i wygląda jak usterka, nie jak zmiana strony.
+        let max_rows = KeyboardPage::Letters
+            .rows()
+            .len()
+            .max(KeyboardPage::Symbols.rows().len()) as i32
+            + 1;
+        let max_key_h = ((h * KB_MAX_HEIGHT_PCT / 100 - (max_rows - 1) * KB_GAP) / max_rows)
+            .clamp(KEY_H_MIN, KEY_H_MAX);
+        // 12 px odstępu, żeby ostatni wiersz listy nie dotykał klawiszy.
+        let summary_bottom = h - KB_MARGIN - (max_rows * max_key_h + (max_rows - 1) * KB_GAP) - 12;
+
+        Self {
+            w,
+            gap: KB_GAP,
+            unit: (w - 2 * KB_MARGIN - 9 * KB_GAP) / 10,
+            key_h,
+            kb_top,
+            compact,
+            content_margin: if compact { 20 } else { 28 },
+            title_base,
+            rule_y,
+            tabs_y,
+            tab_h,
+            label_base,
+            box_y,
+            box_h,
+            hint_base,
+            summary_top: hint_base as i32 + 16,
+            summary_bottom,
+        }
+    }
+
+    /// Szerokość klawisza obejmującego `units` pozycji siatki wraz z przerwami,
+    /// które połyka. Dzięki temu pasek o sumie 10 jednostek ma dokładnie tę samą
+    /// szerokość co wiersz dziesięciu klawiszy.
+    fn span(&self, units: f32) -> i32 {
+        (units * self.unit as f32 + (units - 1.0) * self.gap as f32).round() as i32
+    }
+}
+
+/// Rysuje ekran konfiguracji i zwraca obszary dotykowe.
+///
+/// To jedyna droga wprowadzania danych do urządzenia — patrz [`crate::setup`].
+pub fn render_setup(setup: &Setup, fonts: &Fonts, c: &mut Gray8) -> Screen {
+    c.clear(WHITE);
+
+    let mut screen = Screen::default();
+    let g = SetupGeom::of(c, setup);
+
+    draw_setup_head(setup, fonts, c, &mut screen, &g);
+    draw_setup_summary(setup, fonts, c, &mut screen, &g);
+    draw_keyboard(setup, fonts, c, &mut screen, &g);
+
+    screen
+}
+
+fn draw_setup_head(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    screen: &mut Screen,
+    g: &SetupGeom,
+) {
+    let m = g.content_margin;
+
+    fonts.draw(
+        c,
+        "Konfiguracja",
+        m as f32,
+        g.title_base,
+        if g.compact { 26.0 } else { 32.0 },
+        Weight::Bold,
+        BLACK,
+        Align::Left,
+    );
+
+    // Po prawej stronie tytułu: czego jeszcze brakuje. To jedyne miejsce, w którym
+    // widać postęp — zakładek jest sześć i cztery z nich są opcjonalne.
+    let status_size = if g.compact { 17.0 } else { 19.0 };
+    let (status, ink) = match setup.first_missing() {
+        Some(field) => (format!("brakuje: {}", field.tab()), BLACK),
+        None => ("komplet — naciśnij zapisz".to_string(), GRAY_40),
+    };
+    fonts.draw(
+        c,
+        &status,
+        (g.w - m) as f32,
+        g.title_base,
+        status_size,
+        Weight::Regular,
+        ink,
+        Align::Right,
+    );
+
+    hline(c, m, g.rule_y, g.w - 2 * m, 2, BLACK);
+
+    // --- zakładki pól ------------------------------------------------------
+    let count = Field::ALL.len() as i32;
+    let tab_gap = 8;
+    let tab_w = (g.w - 2 * m - (count - 1) * tab_gap) / count;
+    let tab_size = if g.compact { 17.0 } else { 19.0 };
+
+    for (i, field) in Field::ALL.into_iter().enumerate() {
+        let r = Rect::new(m + i as i32 * (tab_w + tab_gap), g.tabs_y, tab_w, g.tab_h);
+        let active = field == setup.field();
+
+        if active {
+            fill_round_rect(c, r, 10.0, BLACK);
+        } else {
+            stroke_round_rect(c, r, 10.0, 2, GRAY_40);
+        }
+
+        // Kropka przy polach wymaganych, które są jeszcze puste. Bez niej nie widać,
+        // że „iCal" to nie jest opcja, dopóki nie kliknie się w zakładkę.
+        let label = if field.required() && setup.value(field).is_empty() {
+            format!("• {}", field.tab())
+        } else {
+            field.tab().to_string()
+        };
+        let label = fonts.truncate(&label, (tab_w - 12) as f32, tab_size, Weight::Medium);
+
+        fonts.draw(
+            c,
+            &label,
+            (r.x + r.w / 2) as f32,
+            (r.y + r.h / 2) as f32 + tab_size * 0.36,
+            tab_size,
+            Weight::Medium,
+            if active { WHITE } else { BLACK },
+            Align::Center,
+        );
+
+        screen.hits.push(HitRegion::new(r, Action::Focus(field)));
+    }
+
+    // --- edytowane pole ----------------------------------------------------
+    fonts.draw(
+        c,
+        setup.field().label(),
+        m as f32,
+        g.label_base,
+        if g.compact { 18.0 } else { 20.0 },
+        Weight::Regular,
+        GRAY_40,
+        Align::Left,
+    );
+
+    let boxr = Rect::new(m, g.box_y, g.w - 2 * m, g.box_h);
+    stroke_round_rect(c, boxr, 8.0, 2, BLACK);
+
+    let size = if g.compact { 24.0 } else { 28.0 };
+    let pad = 14;
+    // 10 px zapasu na kursor, żeby nie wylazł za ramkę przy pełnym polu.
+    let avail = (boxr.w - 2 * pad - 10) as f32;
+    let shown = tail_that_fits(fonts, setup.current(), avail, size);
+    let baseline = (boxr.y + boxr.h / 2) as f32 + size * 0.35;
+    let drawn = fonts.draw(
+        c,
+        &shown,
+        (boxr.x + pad) as f32,
+        baseline,
+        size,
+        Weight::Regular,
+        BLACK,
+        Align::Left,
+    );
+
+    // Kursor. Stoi zawsze na końcu — pole nie ma nawigacji w środku tekstu i to
+    // jest świadome: strzałki na e-papierze przy 0,28 s na odświeżenie to gorsze
+    // narzędzie niż skasowanie i wpisanie od nowa.
+    vline(
+        c,
+        boxr.x + pad + drawn as i32 + 3,
+        boxr.y + 10,
+        boxr.h - 20,
+        3,
+        BLACK,
+    );
+
+    let hint_size = if g.compact { 16.0 } else { 18.0 };
+    let hint = fonts.truncate(
+        setup.field().hint(),
+        (g.w - 2 * m) as f32,
+        hint_size,
+        Weight::Regular,
+    );
+    fonts.draw(
+        c,
+        &hint,
+        m as f32,
+        g.hint_base,
+        hint_size,
+        Weight::Regular,
+        GRAY_40,
+        Align::Left,
+    );
+}
+
+/// Lista wszystkich pól z tym, co urządzenie ma zapamiętane.
+///
+/// Rysowana tylko wtedy, gdy nad klawiaturą zostaje miejsce — czyli w pionie.
+/// W poziomie zostaje ~60 px i rolę „co już jest wpisane" pełnią same zakładki.
+/// W pionie zostaje ~250 px i bez tego bloku nie dałoby się jednym spojrzeniem
+/// sprawdzić konfiguracji, a ekran wyglądałby na niedokończony.
+///
+/// Wiersze są jednocześnie obszarami dotykowymi. Są znacznie większym celem niż
+/// zakładka, więc na urządzeniu to one będą główną drogą przełączania pola.
+fn draw_setup_summary(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    screen: &mut Screen,
+    g: &SetupGeom,
+) {
+    const HEAD_H: i32 = 24;
+    const LABEL_W: i32 = 120;
+    /// Wiersz niższy niż to przestaje być celem dla palca; wyższy tylko rozciąga
+    /// listę bez zysku.
+    const ROW_H_MIN: i32 = 28;
+    const ROW_H_MAX: i32 = 40;
+
+    let m = g.content_margin;
+    let top = g.summary_top;
+    let count = Field::ALL.len() as i32;
+
+    let avail = g.summary_bottom - top;
+    let row_h = ((avail - HEAD_H) / count).clamp(ROW_H_MIN, ROW_H_MAX);
+    if HEAD_H + count * row_h > avail {
+        // W poziomie nad klawiaturą zostaje ~44 px i lista się nie mieści.
+        return;
+    }
+
+    fonts.draw(
+        c,
+        "zapamiętane",
+        m as f32,
+        (top + 12) as f32,
+        16.0,
+        Weight::Medium,
+        GRAY_40,
+        Align::Left,
+    );
+    hline(c, m, top + HEAD_H - 6, g.w - 2 * m, 1, GRAY_80);
+
+    for (i, field) in Field::ALL.into_iter().enumerate() {
+        let y = top + HEAD_H + i as i32 * row_h;
+        let baseline = (y + row_h / 2) as f32 + 6.0;
+        let active = field == setup.field();
+        let weight = if active {
+            Weight::Medium
+        } else {
+            Weight::Regular
+        };
+
+        fonts.draw(
+            c,
+            field.tab(),
+            m as f32,
+            baseline,
+            18.0,
+            weight,
+            if active { BLACK } else { GRAY_40 },
+            Align::Left,
+        );
+
+        let value = summary_value(setup, field);
+        let value = fonts.truncate(&value, (g.w - 2 * m - LABEL_W) as f32, 18.0, weight);
+        fonts.draw(
+            c,
+            &value,
+            (m + LABEL_W) as f32,
+            baseline,
+            18.0,
+            weight,
+            BLACK,
+            Align::Left,
+        );
+
+        screen.hits.push(HitRegion::new(
+            Rect::new(m - 8, y, g.w - 2 * m + 16, row_h),
+            Action::Focus(field),
+        ));
+    }
+}
+
+/// Wartość pokazywana na liście.
+///
+/// Hasło idzie w kropkach nie z powodu tajemnicy — edytowane widać w całości, bo
+/// inaczej nie dałoby się go wpisać z klawiatury dotykowej i sprawdzić literówki —
+/// tylko dlatego, że na liście nic by nie wnosiło, a urządzenie wisi na ścianie.
+fn summary_value(setup: &Setup, field: Field) -> String {
+    let raw = setup.value(field);
+    if raw.is_empty() {
+        return match field {
+            // To samo domyślne, co `Config::tz()` w firmwarze.
+            Field::Timezone => "Europe/Warsaw".to_string(),
+            _ => "—".to_string(),
+        };
+    }
+    if field == Field::Password {
+        return "•".repeat(raw.chars().count().min(16));
+    }
+    raw.to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyStyle {
+    Normal,
+    /// `⇧` jednorazowy — grubsza ramka.
+    Marked,
+    /// Wypełniony: `⇧` zablokowany albo gotowy „zapisz".
+    Filled,
+}
+
+fn draw_keyboard(setup: &Setup, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen, g: &SetupGeom) {
+    let rows = setup.page().rows();
+    let caps = setup.caps().is_active();
+    let size = if g.compact { 24.0 } else { 28.0 };
+
+    for (r, row) in rows.iter().enumerate() {
+        let n = row.chars().count() as i32;
+        let total = n * g.unit + (n - 1) * g.gap;
+        let x0 = (g.w - total) / 2;
+        let y = g.kb_top + r as i32 * (g.key_h + g.gap);
+
+        for (i, ch) in row.chars().enumerate() {
+            let rect = Rect::new(x0 + i as i32 * (g.unit + g.gap), y, g.unit, g.key_h);
+            // Na klawiszu widać to, co wpiszemy — a akcja niesie znak MAŁY.
+            // Wielkość liter rozstrzyga `Setup::apply`, żeby stan `⇧` był
+            // w jednym miejscu, a nie w dwóch.
+            let label = if caps {
+                ch.to_uppercase().collect::<String>()
+            } else {
+                ch.to_string()
+            };
+            draw_key(fonts, c, rect, &label, size, KeyStyle::Normal);
+            screen.hits.push(HitRegion::new(rect, Action::Key(ch)));
+        }
+    }
+
+    // Pasek dolny: `Aa`, przełącznik strony, spacja, kasowanie, zapis.
+    //
+    // Wszystkie napisy są słowami, nie symbolami, i to jest wymuszone: wbudowany
+    // krój nie ma ANI `⇧`, ANI `⌫`, ANI nawet `←` — mimo że `tools/subset-fonts.sh`
+    // wymienia zakres strzałek, źródłowy Noto Sans ich nie zawiera i pyftsubset je
+    // pomija. Brakujący glif rysuje się jako nic, więc klawisz z „←" był po prostu
+    // pustym prostokątem. Patrz `Fonts::has_glyph`.
+    let bar_y = g.kb_top + rows.len() as i32 * (g.key_h + g.gap);
+    let bar_w = 10 * g.unit + 9 * g.gap;
+    let mut x = (g.w - bar_w) / 2;
+    let bar_size = if g.compact { 19.0 } else { 21.0 };
+
+    let caps_style = match setup.caps() {
+        Caps::Off => KeyStyle::Normal,
+        Caps::Once => KeyStyle::Marked,
+        Caps::Lock => KeyStyle::Filled,
+    };
+    let save_style = if setup.is_complete() {
+        KeyStyle::Filled
+    } else {
+        KeyStyle::Normal
+    };
+
+    // Jednostki sumują się do 10, czyli dokładnie do szerokości wiersza klawiszy.
+    let bar: [(f32, &str, Action, KeyStyle); 5] = [
+        (1.5, "Aa", Action::Caps, caps_style),
+        (
+            1.5,
+            setup.page().switch_label(),
+            Action::KeyPage,
+            KeyStyle::Normal,
+        ),
+        (3.0, "spacja", Action::Key(' '), KeyStyle::Normal),
+        (2.0, "usuń", Action::Backspace, KeyStyle::Normal),
+        (2.0, "zapisz", Action::Save, save_style),
+    ];
+
+    for (units, label, action, style) in bar {
+        let w = g.span(units);
+        let rect = Rect::new(x, bar_y, w, g.key_h);
+        draw_key(fonts, c, rect, label, bar_size, style);
+        screen.hits.push(HitRegion::new(rect, action));
+        x += w + g.gap;
+    }
+}
+
+fn draw_key(fonts: &Fonts, c: &mut Gray8, r: Rect, label: &str, size: f32, style: KeyStyle) {
+    match style {
+        KeyStyle::Normal => stroke_round_rect(c, r, 8.0, 2, GRAY_40),
+        KeyStyle::Marked => stroke_round_rect(c, r, 8.0, 4, BLACK),
+        KeyStyle::Filled => fill_round_rect(c, r, 8.0, BLACK),
+    }
+
+    let ink = if style == KeyStyle::Filled {
+        WHITE
+    } else {
+        BLACK
+    };
+    let label = fonts.truncate(label, (r.w - 8) as f32, size, Weight::Medium);
+    fonts.draw(
+        c,
+        &label,
+        (r.x + r.w / 2) as f32,
+        (r.y + r.h / 2) as f32 + size * 0.36,
+        size,
+        Weight::Medium,
+        ink,
+        Align::Center,
+    );
+}
+
+/// Zwraca końcówkę tekstu mieszczącą się w `max_width`, poprzedzoną wielokropkiem.
+///
+/// [`Fonts::truncate`] ucina koniec, a tutaj potrzebny jest odwrotny kierunek:
+/// przy wpisywaniu 120-znakowego adresu iCal trzeba widzieć to, co się właśnie
+/// stuka, a nie początek sprzed dwóch minut.
+fn tail_that_fits(fonts: &Fonts, s: &str, max_width: f32, size: f32) -> String {
+    if fonts.measure(s, size, Weight::Regular) <= max_width {
+        return s.to_string();
+    }
+
+    let ell_w = fonts.measure("…", size, Weight::Regular);
+    let mut start = s.len();
+    // Idziemy po granicach ZNAKÓW od końca — cięcie po bajtach rozwaliłoby „ż".
+    for (i, _) in s.char_indices().rev() {
+        if fonts.measure(&s[i..], size, Weight::Regular) + ell_w > max_width {
+            break;
+        }
+        start = i;
+    }
+    format!("…{}", &s[start..])
 }
 
 #[cfg(test)]
@@ -1187,5 +1712,354 @@ mod tests {
         let mut c = Gray8::new(Rotation::default());
         render(&m, &fonts, &mut c);
         assert_eq!(c.pixels().len(), c.width() * c.height());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ekran konfiguracji
+    // -----------------------------------------------------------------------
+
+    use crate::setup::{Applied, Field, Page, Setup};
+
+    /// Każda orientacja razy każda strona klawiatury — cztery kombinacje, w których
+    /// coś może wyjść poza płótno albo wejść na coś innego.
+    fn kazdy_wariant() -> Vec<(Rotation, Page, Setup)> {
+        let mut out = Vec::new();
+        for rotation in [Rotation::Portrait, Rotation::Landscape] {
+            for page in [Page::Letters, Page::Symbols] {
+                let mut s = Setup::new();
+                if page == Page::Symbols {
+                    s.apply(Action::KeyPage);
+                }
+                out.push((rotation, page, s));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn klawiatura_miesci_sie_w_plotnie() {
+        let fonts = Fonts::embedded();
+        for (rotation, page, setup) in kazdy_wariant() {
+            let mut c = Gray8::new(rotation);
+            let screen = render_setup(&setup, &fonts, &mut c);
+            let (w, h) = (c.width() as i32, c.height() as i32);
+
+            for hit in &screen.hits {
+                assert!(
+                    hit.rect.x >= 0
+                        && hit.rect.y >= 0
+                        && hit.rect.right() <= w
+                        && hit.rect.bottom() <= h,
+                    "{rotation:?}/{page:?}: {:?} wychodzi poza {w}x{h}",
+                    hit.rect
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kazdy_klawisz_ma_wlasny_obszar_dotykowy() {
+        let fonts = Fonts::embedded();
+        for (rotation, page, setup) in kazdy_wariant() {
+            let mut c = Gray8::new(rotation);
+            let screen = render_setup(&setup, &fonts, &mut c);
+
+            for row in page.rows() {
+                for ch in row.chars() {
+                    assert!(
+                        screen.hits.iter().any(|h| h.action == Action::Key(ch)),
+                        "{rotation:?}/{page:?}: brak obszaru dla `{ch}`"
+                    );
+                }
+            }
+            // Pasek dolny jest na obu stronach.
+            for action in [
+                Action::Caps,
+                Action::KeyPage,
+                Action::Key(' '),
+                Action::Backspace,
+                Action::Save,
+            ] {
+                assert!(
+                    screen.hits.iter().any(|h| h.action == action),
+                    "{rotation:?}/{page:?}: brak {action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn obszary_dotykowe_nie_nachodza_na_siebie() {
+        let fonts = Fonts::embedded();
+        for (rotation, page, setup) in kazdy_wariant() {
+            let mut c = Gray8::new(rotation);
+            let screen = render_setup(&setup, &fonts, &mut c);
+
+            for (i, a) in screen.hits.iter().enumerate() {
+                for b in &screen.hits[i + 1..] {
+                    let overlap = a.rect.x < b.rect.right()
+                        && b.rect.x < a.rect.right()
+                        && a.rect.y < b.rect.bottom()
+                        && b.rect.y < a.rect.bottom();
+                    assert!(
+                        !overlap,
+                        "{rotation:?}/{page:?}: {:?} nachodzi na {:?}",
+                        a.action, b.action
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn klawiatura_nie_wchodzi_na_pole_wartosci() {
+        let fonts = Fonts::embedded();
+        for (rotation, page, setup) in kazdy_wariant() {
+            let mut c = Gray8::new(rotation);
+            let g = SetupGeom::of(&c, &setup);
+            let _ = render_setup(&setup, &fonts, &mut c);
+            assert!(
+                g.hint_base < g.kb_top as f32,
+                "{rotation:?}/{page:?}: podpowiedź na linii {} wchodzi na klawiaturę od {}",
+                g.hint_base,
+                g.kb_top
+            );
+        }
+    }
+
+    #[test]
+    fn zakladki_prowadza_do_wszystkich_pol() {
+        let fonts = Fonts::embedded();
+        let mut c = Gray8::new(Rotation::Portrait);
+        let screen = render_setup(&Setup::new(), &fonts, &mut c);
+        for field in Field::ALL {
+            assert!(
+                screen.hits.iter().any(|h| h.action == Action::Focus(field)),
+                "brak zakładki dla {field:?}"
+            );
+        }
+    }
+
+    /// Pełna droga: narysuj, trafnij w środek klawisza, zastosuj akcję.
+    /// To jest dokładnie to, co robi firmware po odczycie z GT911.
+    #[test]
+    fn dotkniecie_klawisza_wpisuje_znak() {
+        let fonts = Fonts::embedded();
+        let mut setup = Setup::new();
+
+        for ch in "dom".chars() {
+            let mut c = Gray8::new(Rotation::Portrait);
+            let screen = render_setup(&setup, &fonts, &mut c);
+            let key = screen
+                .hits
+                .iter()
+                .find(|h| h.action == Action::Key(ch))
+                .unwrap_or_else(|| panic!("brak klawisza `{ch}`"));
+
+            let action = screen
+                .hit(key.rect.x + key.rect.w / 2, key.rect.y + key.rect.h / 2)
+                .expect("środek klawisza musi trafiać");
+            assert_eq!(setup.apply(action), Applied::Edited);
+        }
+
+        assert_eq!(setup.value(Field::Ssid), "dom");
+    }
+
+    #[test]
+    fn dotkniecie_zakladki_przelacza_pole() {
+        let fonts = Fonts::embedded();
+        let mut setup = Setup::new();
+        let mut c = Gray8::new(Rotation::Landscape);
+        let screen = render_setup(&setup, &fonts, &mut c);
+
+        let tab = screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::Focus(Field::Ics))
+            .unwrap();
+        let action = screen
+            .hit(tab.rect.x + tab.rect.w / 2, tab.rect.y + tab.rect.h / 2)
+            .unwrap();
+        assert_eq!(setup.apply(action), Applied::Relayout);
+        assert_eq!(setup.field(), Field::Ics);
+    }
+
+    #[test]
+    fn dlugi_adres_pokazuje_koncowke_a_nie_poczatek() {
+        let fonts = Fonts::embedded();
+        let long =
+            "https://calendar.google.com/calendar/ical/ktos%40gmail.com/private-abc123/basic.ics";
+        let shown = tail_that_fits(&fonts, long, 300.0, 24.0);
+        assert!(shown.starts_with('…'), "brak sygnału ucięcia: {shown}");
+        assert!(
+            long.ends_with(shown.trim_start_matches('…')),
+            "pokazany fragment nie jest końcówką: {shown}"
+        );
+        assert!(fonts.measure(&shown, 24.0, Weight::Regular) <= 300.0);
+    }
+
+    #[test]
+    fn krotki_adres_pokazuje_sie_w_calosci() {
+        let fonts = Fonts::embedded();
+        assert_eq!(tail_that_fits(&fonts, "dom", 300.0, 24.0), "dom");
+        assert_eq!(tail_that_fits(&fonts, "", 300.0, 24.0), "");
+    }
+
+    #[test]
+    fn wersja_w_stopce_otwiera_konfiguracje() {
+        let fonts = Fonts::embedded();
+        let mut model = Model::empty(dt(12, 0));
+        model.firmware = "t5s3pro 0.1.0+gabc1234".to_string();
+        let mut c = Gray8::new(Rotation::Portrait);
+        let screen = render(&model, &fonts, &mut c);
+
+        let hit = screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::OpenSetup)
+            .expect("wersja w stopce musi być wejściem do konfiguracji");
+        // Palec, nie kursor myszy.
+        assert!(hit.rect.h >= 44, "obszar {} px jest za niski", hit.rect.h);
+    }
+
+    #[test]
+    fn nieskonfigurowane_urzadzenie_prowadzi_do_konfiguracji_z_naglowka() {
+        let fonts = Fonts::embedded();
+        let mut model = Model::empty(dt(12, 0));
+        model.net = NetState::NeedsAuth;
+        let mut c = Gray8::new(Rotation::Portrait);
+        let screen = render(&model, &fonts, &mut c);
+
+        // Plakietka „skonfiguruj urządzenie" otwiera konfigurację zamiast wymuszać
+        // pobranie, którego i tak nie ma z czego zrobić.
+        assert!(screen.hits.iter().any(|h| h.action == Action::OpenSetup));
+        assert!(
+            !screen.hits.iter().any(|h| h.action == Action::RefreshNow),
+            "na nieskonfigurowanym urządzeniu odświeżenie nie ma sensu"
+        );
+    }
+
+    #[test]
+    fn skonfigurowane_urzadzenie_zachowuje_odswiezenie_z_naglowka() {
+        let fonts = Fonts::embedded();
+        let model = Model::empty(dt(12, 0));
+        let mut c = Gray8::new(Rotation::Portrait);
+        let screen = render(&model, &fonts, &mut c);
+        assert!(screen.hits.iter().any(|h| h.action == Action::RefreshNow));
+    }
+
+    /// Brakujący glif rysuje się jako NIC — bez tofu, bez ostrzeżenia, z poprawnym
+    /// układem. Klawisz kasowania z napisem „←" był przez to pustym prostokątem,
+    /// mimo że `tools/subset-fonts.sh` wymienia zakres strzałek: źródłowy Noto Sans
+    /// ich nie ma i pyftsubset je po cichu pomija.
+    ///
+    /// Ten test przechodzi po każdym znaku, który interfejs może narysować.
+    #[test]
+    fn wszystkie_znaki_interfejsu_maja_glify() {
+        use std::collections::BTreeSet;
+
+        let fonts = Fonts::embedded();
+        let mut znaki: BTreeSet<char> = BTreeSet::new();
+
+        for page in [Page::Letters, Page::Symbols] {
+            for row in page.rows() {
+                for ch in row.chars() {
+                    znaki.insert(ch);
+                    // Klawiatura pokazuje wersje wielkie, gdy `⇧` jest włączony.
+                    znaki.extend(ch.to_uppercase());
+                }
+            }
+            znaki.extend(page.switch_label().chars());
+        }
+
+        for field in Field::ALL {
+            znaki.extend(field.tab().chars());
+            znaki.extend(field.label().chars());
+            znaki.extend(field.hint().chars());
+        }
+
+        for napis in [
+            "Konfiguracja",
+            "komplet — naciśnij zapisz",
+            "brakuje:",
+            "zapamiętane",
+            "Europe/Warsaw",
+            "Aa",
+            "spacja",
+            "usuń",
+            "zapisz",
+            "•",
+            "…",
+            "—",
+        ] {
+            znaki.extend(napis.chars());
+        }
+
+        for weight in [Weight::Regular, Weight::Medium, Weight::Bold] {
+            for ch in &znaki {
+                assert!(
+                    fonts.has_glyph(*ch, weight),
+                    "krój {weight:?} nie ma glifu `{ch}` (U+{:04X}) — narysuje się jako nic",
+                    *ch as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lista_pol_pokazuje_zapamietane_wartosci() {
+        let mut s = Setup::new();
+        s.set(Field::Ssid, "Dom");
+        s.set(Field::Password, "tajne");
+
+        assert_eq!(summary_value(&s, Field::Ssid), "Dom");
+        // Hasło w kropkach, po jednej na znak.
+        assert_eq!(summary_value(&s, Field::Password), "•••••");
+        assert_eq!(summary_value(&s, Field::Ics), "—");
+        // Puste pole strefy pokazuje to, co firmware faktycznie zastosuje.
+        assert_eq!(summary_value(&s, Field::Timezone), "Europe/Warsaw");
+    }
+
+    #[test]
+    fn lista_pol_jest_w_pionie_a_w_poziomie_jej_nie_ma() {
+        let fonts = Fonts::embedded();
+        let setup = Setup::new();
+
+        // W pionie każde pole ma DWA wejścia: zakładkę i wiersz listy.
+        let mut c = Gray8::new(Rotation::Portrait);
+        let pion = render_setup(&setup, &fonts, &mut c);
+        let wejscia = pion
+            .hits
+            .iter()
+            .filter(|h| h.action == Action::Focus(Field::Ota))
+            .count();
+        assert_eq!(wejscia, 2, "w pionie ma być zakładka i wiersz listy");
+
+        // ...i ma tam zostać po przełączeniu na stronę symboli, która jest o wiersz
+        // wyższa. Znikająca lista to przemalowanie ćwiartki ekranu przy zmianie
+        // strony klawiatury.
+        let mut symbole = Setup::new();
+        symbole.apply(Action::KeyPage);
+        let mut c = Gray8::new(Rotation::Portrait);
+        let pion_symbole = render_setup(&symbole, &fonts, &mut c);
+        let wejscia = pion_symbole
+            .hits
+            .iter()
+            .filter(|h| h.action == Action::Focus(Field::Ota))
+            .count();
+        assert_eq!(
+            wejscia, 2,
+            "lista pól nie może znikać po zmianie strony klawiatury"
+        );
+
+        // W poziomie nad klawiaturą nie ma na listę miejsca — zostaje sama zakładka.
+        let mut c = Gray8::new(Rotation::Landscape);
+        let poziom = render_setup(&setup, &fonts, &mut c);
+        let wejscia = poziom
+            .hits
+            .iter()
+            .filter(|h| h.action == Action::Focus(Field::Ota))
+            .count();
+        assert_eq!(wejscia, 1, "w poziomie ma zostać sama zakładka");
     }
 }

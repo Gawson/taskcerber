@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use chrono::NaiveDateTime;
 use dashboard::model::{Battery, DayGroup, NetState};
-use dashboard::{Action, Fonts, Gray8, Model, Rotation, Screen};
+use dashboard::setup::Field;
+use dashboard::{Action, Applied, Fonts, Gray8, Model, Rotation, Screen, Setup};
 
 /// Tryb odświeżania, ten sam podział co w firmware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,12 @@ pub struct Device {
     refresh_mode: Refresh,
     fast_count: u8,
 
+    /// `Some` = panel pokazuje ekran konfiguracji zamiast agendy.
+    ///
+    /// Na urządzeniu to samo rozstrzygnięcie robi firmware: dopóki ekran
+    /// konfiguracji jest otwarty, cykl nie idzie spać i nie sięga po sieć.
+    setup: Option<Setup>,
+
     /// Symulacja duchów po szybkim odświeżaniu.
     pub simulate_ghosting: bool,
     ghost: Option<Gray8>,
@@ -87,6 +94,7 @@ impl Device {
             refresh_started: None,
             refresh_mode: Refresh::Full,
             fast_count: 0,
+            setup: None,
             simulate_ghosting: true,
             ghost: None,
             stats: Stats::default(),
@@ -108,7 +116,10 @@ impl Device {
     /// Renderuje bieżący model i rozpoczyna odświeżanie panelu.
     pub fn render_and_push(&mut self, mode: Refresh) {
         let started = Instant::now();
-        self.screen = dashboard::render(&self.model, &self.fonts, &mut self.pending);
+        self.screen = match &self.setup {
+            Some(setup) => dashboard::render_setup(setup, &self.fonts, &mut self.pending),
+            None => dashboard::render(&self.model, &self.fonts, &mut self.pending),
+        };
         self.stats.last_render_us = started.elapsed().as_micros();
         self.stats.renders += 1;
 
@@ -240,8 +251,47 @@ impl Device {
         Some(action)
     }
 
+    /// Kończy trwające odświeżanie natychmiast — wyłącznie dla testów.
+    ///
+    /// Prawdziwy panel nie reaguje na dotyk, dopóki się odświeża, i `touch` to
+    /// odwzorowuje. W teście czekanie 1,2 s na każdą literę byłoby absurdem.
+    #[cfg(test)]
+    fn finish_refresh_for_test(&mut self) {
+        self.refresh_started = None;
+    }
+
+    /// Czy panel pokazuje teraz ekran konfiguracji.
+    pub fn setup_open(&self) -> bool {
+        self.setup.is_some()
+    }
+
     /// Stosuje akcję do modelu i odświeża.
     pub fn apply(&mut self, action: Action) {
+        // Otwarty ekran konfiguracji przechwytuje swoje akcje, zanim dojdą do agendy.
+        if self.setup.is_some() {
+            let applied = self
+                .setup
+                .as_mut()
+                .map(|setup| setup.apply(action))
+                .unwrap_or(Applied::Ignored);
+
+            match applied {
+                // Wpisany znak zmienia jeden wiersz — na panelu to odświeżenie DU
+                // (~0,28 s). Pełne po każdej literze byłoby nie do zniesienia.
+                Applied::Edited | Applied::Relayout => {
+                    self.repaint();
+                    return;
+                }
+                Applied::Save => {
+                    self.commit_setup();
+                    return;
+                }
+                // Akcje agendy w trakcie konfiguracji nie mają znaczenia — poza
+                // jedną, którą obsługujemy niżej.
+                Applied::Ignored => {}
+            }
+        }
+
         match action {
             Action::NextPage => {
                 if self.model.page + 1 < self.screen.pages {
@@ -268,7 +318,51 @@ impl Device {
                 self.model.focus = None;
                 self.render_and_push(Refresh::Full);
             }
+            Action::OpenSetup => {
+                self.setup = Some(Setup::new());
+                // Pełne odświeżenie: zmienia się cały ekran, a nie wiersz.
+                self.render_and_push(Refresh::Full);
+            }
+            // Akcje klawiatury poza ekranem konfiguracji nie znaczą nic. Nie mogą
+            // się tu pojawić przy dotyku (regionów nie ma), ale `apply` jest
+            // publiczne i wołane też z klawiatury komputera.
+            Action::Key(_)
+            | Action::Backspace
+            | Action::Caps
+            | Action::KeyPage
+            | Action::Focus(_)
+            | Action::Save => {}
         }
+    }
+
+    /// Zamyka ekran konfiguracji tak, jak zrobi to firmware.
+    ///
+    /// Symulator **kłamie tylko tam, gdzie musi**: NVS-u nie ma, więc wypisuje na
+    /// wyjście to, co zostałoby zapisane, a resztę odgrywa wiernie — stan sieci
+    /// przestaje być `NeedsAuth`, gdy komplet wymaganych pól jest wypełniony,
+    /// dokładnie tak jak `Config::is_provisioned`.
+    fn commit_setup(&mut self) {
+        let Some(setup) = self.setup.take() else {
+            return;
+        };
+
+        println!("--- zapis konfiguracji (na urządzeniu: NVS) ---");
+        for field in Field::ALL {
+            let value = setup.value(field);
+            let shown = if value.is_empty() {
+                "(puste)".to_string()
+            } else if field == Field::Password {
+                format!("({} znaków)", value.chars().count())
+            } else {
+                devlogic::redact(value)
+            };
+            println!("  {:<8} {shown}", field.tab());
+        }
+
+        if setup.is_complete() {
+            self.model.net = NetState::Ok;
+        }
+        self.render_and_push(Refresh::Full);
     }
 
     /// Podmienia dane kalendarza, zachowując resztę stanu.
@@ -420,5 +514,74 @@ mod tests {
             Refresh::Full,
             "po {FAST_BEFORE_FULL} szybkich odświeżeniach ma wejść pełne"
         );
+    }
+
+    /// Pełna droga tak, jak zrobi to firmware: dotknięcie otwiera konfigurację,
+    /// stukanie w klawisze wpisuje znaki, „zapisz" wraca do agendy.
+    #[test]
+    fn konfiguracja_otwiera_sie_dotykiem_i_przyjmuje_znaki() {
+        let mut dev = Device::new(model_z_wersja(), Rotation::Portrait);
+        assert!(!dev.setup_open());
+
+        // Wersja w stopce jest wejściem do konfiguracji.
+        let wejscie = dev
+            .screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::OpenSetup)
+            .expect("stopka musi prowadzić do konfiguracji")
+            .rect;
+        dev.finish_refresh_for_test();
+        assert_eq!(
+            dev.touch(wejscie.x + wejscie.w / 2, wejscie.y + wejscie.h / 2),
+            Some(Action::OpenSetup)
+        );
+        assert!(dev.setup_open());
+
+        // Klawisze są tam, gdzie je narysowano.
+        for ch in "dom".chars() {
+            dev.finish_refresh_for_test();
+            let key = dev
+                .screen
+                .hits
+                .iter()
+                .find(|h| h.action == Action::Key(ch))
+                .unwrap_or_else(|| panic!("brak klawisza `{ch}`"))
+                .rect;
+            assert_eq!(
+                dev.touch(key.x + key.w / 2, key.y + key.h / 2),
+                Some(Action::Key(ch))
+            );
+        }
+
+        // „zapisz" zamyka ekran i wraca do agendy.
+        dev.finish_refresh_for_test();
+        let save = dev
+            .screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::Save)
+            .unwrap()
+            .rect;
+        dev.touch(save.x + save.w / 2, save.y + save.h / 2);
+        assert!(!dev.setup_open(), "zapis musi zamknąć konfigurację");
+    }
+
+    #[test]
+    fn agenda_nie_reaguje_na_klawisze_konfiguracji() {
+        let mut dev = Device::new(model_z_wersja(), Rotation::Portrait);
+        let strona = dev.model.page;
+        dev.apply(Action::Key('x'));
+        dev.apply(Action::Backspace);
+        dev.apply(Action::Save);
+        assert!(!dev.setup_open());
+        assert_eq!(dev.model.page, strona);
+    }
+
+    fn model_z_wersja() -> Model {
+        let mut m = Model::empty(now());
+        // Bez wersji w stopce nie ma obszaru otwierającego konfigurację.
+        m.firmware = "t5s3pro 0.1.0".to_string();
+        m
     }
 }

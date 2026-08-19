@@ -12,6 +12,7 @@
 //! cargo run -p preview -- empty        # pusty kalendarz
 //! cargo run -p preview -- offline      # brak sieci
 //! cargo run -p preview -- full         # przepełniona agenda
+//! cargo run -p preview -- setup        # ekran konfiguracji (klawiatura dotykowa)
 //! cargo run -p preview -- all          # wszystkie scenariusze naraz
 //! ```
 
@@ -21,7 +22,15 @@ use std::path::Path;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use dashboard::model::{Battery, CalEvent, DayGroup, NetState, SourceTag, Tile};
-use dashboard::{render, Fonts, Gray8, Model, Rotation};
+use dashboard::setup::Field;
+use dashboard::{render, render_setup, Action, Fonts, Gray8, Model, Rotation, Setup};
+
+/// Co renderujemy. Ekran konfiguracji nie jest `Model`-em — ma własny stan — więc
+/// podgląd musi umieć jedno i drugie.
+enum Scene {
+    Dash(Box<Model>),
+    Config(Box<Setup>),
+}
 
 fn main() {
     let arg = std::env::args()
@@ -42,42 +51,58 @@ fn main() {
 
     let fonts = Fonts::embedded();
 
-    let scenarios: Vec<(&str, Model)> = match arg.as_str() {
+    let dash = |m: Model| Scene::Dash(Box::new(m));
+    let scenarios: Vec<(&str, Scene)> = match arg.as_str() {
         "all" => vec![
-            ("week", scenario_week()),
-            ("empty", scenario_empty()),
-            ("offline", scenario_offline()),
-            ("full", scenario_full()),
+            ("week", dash(scenario_week())),
+            ("empty", dash(scenario_empty())),
+            ("offline", dash(scenario_offline())),
+            ("full", dash(scenario_full())),
             ("full-page2", {
                 let mut m = scenario_full();
                 m.page = 1;
-                m
+                dash(m)
             }),
             ("detail", {
                 let mut m = scenario_week();
                 m.focus = Some(1);
-                m
+                dash(m)
             }),
-            ("provisioning", scenario_provisioning()),
+            ("provisioning", dash(scenario_provisioning())),
+            ("setup", Scene::Config(Box::new(scenario_setup_pusty()))),
+            (
+                "setup-adres",
+                Scene::Config(Box::new(scenario_setup_adres())),
+            ),
         ],
-        "empty" => vec![("empty", scenario_empty())],
-        "provisioning" => vec![("provisioning", scenario_provisioning())],
-        "offline" => vec![("offline", scenario_offline())],
-        "full" => vec![("full", scenario_full())],
+        "empty" => vec![("empty", dash(scenario_empty()))],
+        "provisioning" => vec![("provisioning", dash(scenario_provisioning()))],
+        "offline" => vec![("offline", dash(scenario_offline()))],
+        "full" => vec![("full", dash(scenario_full()))],
+        "setup" => vec![
+            ("setup", Scene::Config(Box::new(scenario_setup_pusty()))),
+            (
+                "setup-adres",
+                Scene::Config(Box::new(scenario_setup_adres())),
+            ),
+        ],
         "detail" => vec![("detail", {
             let mut m = scenario_week();
             m.focus = Some(1);
-            m
+            dash(m)
         })],
-        _ => vec![("week", scenario_week())],
+        _ => vec![("week", dash(scenario_week()))],
     };
 
     std::fs::create_dir_all("out").expect("nie mogę utworzyć katalogu out/");
 
-    for (name, model) in scenarios {
+    for (name, scene) in scenarios {
         let started = std::time::Instant::now();
         let mut canvas = Gray8::new(rotation);
-        render(&model, &fonts, &mut canvas);
+        let hits = match &scene {
+            Scene::Dash(model) => render(model, &fonts, &mut canvas).hits.len(),
+            Scene::Config(setup) => render_setup(setup, &fonts, &mut canvas).hits.len(),
+        };
         let render_us = started.elapsed().as_micros();
 
         // Tak jak na panelu: 16 poziomów, nie 256.
@@ -88,7 +113,7 @@ fn main() {
 
         let packed = canvas.to_packed();
         println!(
-            "{path:<20} render {render_us:>6} µs   framebuffer {} B   atrament {:.1}%",
+            "{path:<26} render {render_us:>6} µs   framebuffer {} B   atrament {:.1}%   obszarów dotyku {hits}",
             packed.len(),
             ink_ratio(&canvas) * 100.0
         );
@@ -228,6 +253,26 @@ fn scenario_provisioning() -> Model {
         Tile::new("krok 3", "wpisz WiFi"),
     ];
     m
+}
+
+/// Ekran konfiguracji zaraz po wgraniu firmware'u: nic nie wpisane, litery.
+fn scenario_setup_pusty() -> Setup {
+    Setup::new()
+}
+
+/// Ten sam ekran w najtrudniejszym momencie: wpisywanie 120-znakowego adresu iCal
+/// na stronie z symbolami. To jest scenariusz, który rozstrzyga, czy pole wartości
+/// pokazuje właściwy fragment i czy klawiatura ma z czego to złożyć.
+fn scenario_setup_adres() -> Setup {
+    let mut s = Setup::new();
+    s.set(Field::Ssid, "Dom");
+    s.set(
+        Field::Ics,
+        "https://calendar.google.com/calendar/ical/ktos%40gmail.com/private-9f2c",
+    );
+    s.apply(Action::Focus(Field::Ics));
+    s.apply(Action::KeyPage);
+    s
 }
 
 fn scenario_empty() -> Model {

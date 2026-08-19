@@ -29,7 +29,7 @@ zwykłym `cargo test` — zamiast być debugowane przez wgrywanie i patrzenie na
 Wszystko poniżej działa na zwykłym stabilnym Ruście, bez toolchainu Xtensa.
 
 ```bash
-cargo test                              # 123 testy: render, iCal, dotyk, paginacja, polityka, OTA
+cargo test                              # 153 testy: render, iCal, dotyk, klawiatura, polityka, OTA
 cargo run -p preview -- all             # zrzuty PNG do out/ (pionowo)
 cargo run -p preview -- all landscape   # to samo poziomo, pliki z sufiksem
 cargo run -p simulator                  # interaktywne okno, mysz jako dotyk
@@ -44,8 +44,13 @@ kwantyzacja do 16 poziomów, te same obszary dotykowe, odwzorowane czasy odświe
 ```
 spacja  pełne odświeżenie      B  poziom baterii      S  zrzut PNG
 ← →     zmiana strony          N  stan sieci          1-4 scenariusze
-Esc     powrót ze szczegółów   G  duchy wł/wył        Q  wyjście
+Esc     powrót ze szczegółów   G  duchy wł/wył        K  konfiguracja
+R       pobierz ponownie                              Q  wyjście
 ```
+
+`K` otwiera **ekran konfiguracji z klawiaturą dotykową** — ten sam, który zobaczysz
+na szkle. Myszą stuka się w klawisze dokładnie tak, jak palcem na panelu: to te
+same regiony z `hit::Screen`, których użyje firmware po odczycie z GT911.
 
 Podanie `--ics` z prawdziwym adresem to test integracji end-to-end: pobranie,
 parsowanie, rozwinięcie reguł powtarzania i render — na komputerze, w sekundę.
@@ -136,6 +141,31 @@ Jeśli ostrzeżenie przeszkadza, są dwie drogi bez niego:
    na drugim komputerze, wpisany adres `http://192.168.1.152:8000`, restart
    przeglądarki. Wtedy wystarczy zwykłe `python3 -m http.server`.
 
+### Konfiguracja urządzenia
+
+Świeżo wgrane urządzenie nie ma ani danych WiFi, ani adresu kalendarza i pokazuje
+ekran konfiguracji. Wszystko wpisuje się **dotykiem, na panelu** — nie ma konsoli
+szeregowej, serwera HTTP ani aplikacji towarzyszącej.
+
+Wejścia na ekran konfiguracji są dwa: plakietka „skonfiguruj urządzenie" w nagłówku
+(na nieskonfigurowanym urządzeniu odświeżenie i tak nie ma czego pobrać) oraz numer
+wersji w lewym dolnym rogu — dyskretny, ale z obszarem dotykowym wysokim na 44 px.
+
+Sześć pól: `sieć`, `hasło`, `iCal`, `iCal 2`, `strefa`, `OTA`. Wymagane są dwa —
+nazwa sieci i adres kalendarza; są oznaczone kropką na zakładce, a nad klawiaturą
+widać, czego jeszcze brakuje. Pole wartości pokazuje **końcówkę** wpisywanego
+tekstu, bo przy 120-znakowym adresie iCal to początek jest nieciekawy.
+
+```bash
+cargo run -p simulator      # K otwiera ten ekran, mysz działa jak palec
+cargo run -p preview -- setup   # zrzuty PNG obu wariantów
+```
+
+**Ekran konfiguracji jest wyraźnie wygodniejszy w poziomie.** Klawisz ma wtedy
+87 px zamiast 48 — przy 234 DPI panelu to różnica między 9,8 a 5,2 mm. Orientację
+przestawia przycisk custom (`S3`); w pionie da się pisać, ale adres iCal warto
+wstukać poziomo.
+
 ### Aktualizacja przez sieć (OTA)
 
 `./tools/build-image.sh` publikuje obok sklejki dla webflashera dwa dodatkowe pliki:
@@ -164,10 +194,10 @@ do slotu aplikacji, więc sklejka wylądowałaby tam razem z bootloaderem i tabl
 partycji. `tools/check-image.sh` sprawdza to jawnie — obraz OTA nie może mieć tablicy
 partycji na 0x8000.
 
-Włączenie na urządzeniu to jedno polecenie w konsoli konfiguracyjnej:
-`ota https://twoj-host/ota.json` (klucz NVS `ota_url`). Bez niego OTA jest wyłączone
-i to jest **domyślne**: urządzenie na baterii nie powinno samo sięgać po nowy
-firmware, dopóki ktoś świadomie nie wskaże, skąd.
+Włączenie na urządzeniu to wpisanie adresu manifestu w polu `OTA` na ekranie
+konfiguracji (klucz NVS `ota_url`). Bez niego OTA jest wyłączone i to jest
+**domyślne**: urządzenie na baterii nie powinno samo sięgać po nowy firmware,
+dopóki ktoś świadomie nie wskaże, skąd.
 
 Adres obrazu w manifeście jest **względny**, rozwiązywany względem adresu manifestu,
 więc ten sam artefakt działa z GitHub Pages i z serwera w LAN-ie bez przebudowy.
@@ -212,10 +242,8 @@ TPS65185 potrafi uszkodzić panel.
 ./tools/build-image.sh                       # wersja A — wgraj ją z przeglądarki
 python3 -m http.server -d dist 8000          # ten sam katalog serwuje ota.json
 
-# w konsoli urządzenia (Logs & Console albo espflash monitor):
-#   ota http://192.168.1.152:8000/ota.json
-#   show          <- sprawdź, czy adres się zgadza
-#   done
+# na urządzeniu: dotknij wersji w stopce -> zakładka OTA ->
+#   http://192.168.1.152:8000/ota.json -> zapisz
 
 git commit -am "cokolwiek" && ./tools/build-image.sh   # wersja B, nowa wersja z gita
 ```
@@ -331,6 +359,8 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 | Boot i render na panelu | **uruchomione** — płytka wstaje, rysuje ekran konfiguracji |
 | Czyszczenie panelu, zatrzaski magistrali | **poprawione i sprawdzone na szkle** — obraz czysty po wybudzeniu |
 | Dwie orientacje | **napisane**, pion sprawdzony na szkle, poziom nie |
+| Ekran konfiguracji i klawiatura | **zweryfikowane na hoście** — 77 testów, mysz w symulatorze; na szkle nie |
+| Sterownik dotyku GT911 | **nie istnieje** — bez niego ekranu konfiguracji nie da się obsłużyć na płytce |
 | Decyzja OTA i polityka zasilania | **zweryfikowane** — 27 testów w `devlogic`, chodzą na hoście |
 | I²C, zasilanie, sieć, dotyk | **nieuruchomione** |
 | OTA — transport | **napisany, nieuruchomiony** — włącza się konsolą, wersje z gita |
