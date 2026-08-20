@@ -294,9 +294,9 @@ fn run(mut state: RtcState) -> Result<u64> {
     // siedziała w środku `if needs_paint` i skonfigurowane urządzenie na kablu,
     // z niezmienioną treścią, nie dostawało okna w ogóle.
     // --- Karta tonów: bring-up, nie funkcja produktu ---------------------------
-    if GRAY_TEST_CARD {
-        show_test_card(&mut epd, temperature, rotation);
-        info!("karta tonów wyrysowana — urządzenie idzie spać, obraz zostaje na szkle");
+    if BRING_UP_CARD != BringUpCard::None {
+        show_bring_up_card(&mut epd, temperature, rotation);
+        info!("karta bring-upowa wyrysowana — obraz zostaje na szkle przez cały sen");
         // Ta sama sekwencja zasypiania, co na normalnej ścieżce. Bez niej BOOT
         // przestałby budzić (brak `enable_wakeup`), a magistrala panelu poszłaby
         // w sen niezaizolowana — czyli karta pomiarowa kłamałaby o prądzie
@@ -1415,18 +1415,26 @@ fn repaint_setup(
     (canvas, screen)
 }
 
-/// Czy zamiast normalnego ekranu wyrysować kartę tonów.
+/// Którą kartę bring-upową wyrysować zamiast normalnego ekranu.
+#[derive(PartialEq, Eq)]
+enum BringUpCard {
+    /// Normalna praca.
+    None,
+    /// Drabina szesnastu poziomów, dither kontra półton, biel pełna kontra częściowa.
+    Tones,
+    /// Prawie puste tło z podziałkami we współrzędnych panelu — do pasów.
+    Uniformity,
+}
+
+/// Ile razy dodatkowo przepędzić panel czyszczeniem przed rysowaniem karty.
 ///
-/// Rzecz na czas bring-upu, jak [`SLEEP_MARKER`]. Karta odpowiada na pytanie, którego
-/// nie da się rozstrzygnąć na hoście ani policzyć z noty katalogowej: **które z
-/// szesnastu deklarowanych poziomów szarości ten egzemplarz naprawdę pokazuje**,
-/// osobno dla plam, tekstu i cienkich linii, i czy dither z czerni i bieli nie
-/// wypada lepiej niż prawdziwy półton o tej samej gęstości.
-///
-/// Dopóki to nie jest zmierzone, każdy wybór odcienia w `dashboard::layout` jest
-/// zgadywaniem — a objawy („elementy blade jak artefakty") wskazują, że zgadywanie
-/// wyszło źle. Po odczytaniu karty przestawić na `false`.
-const GRAY_TEST_CARD: bool = false;
+/// Każdy przebieg to ~0,7 s i 96 przelotów przez wszystkie bramki. Służy do
+/// rozstrzygnięcia, czy pasy na tle są nieskasowaną historią (wtedy słabną),
+/// czy cechą szkła (wtedy nie drgną).
+const EXTRA_FULLCLEARS: u32 = 3;
+
+const BRING_UP_CARD: BringUpCard = BringUpCard::Uniformity;
+
 
 /// Jak długo urządzenie śpi po wyrysowaniu karty.
 ///
@@ -1435,7 +1443,7 @@ const GRAY_TEST_CARD: bool = false;
 /// na biurku nie budziła się w kółko.
 const TEST_CARD_SLEEP_S: u64 = 3_600;
 
-/// Rysuje kartę tonów i wypycha jej pole „DU" osobno.
+/// Rysuje wybraną kartę bring-upową i wypycha jej pole „DU" osobno.
 ///
 /// Kolejność jest istotna i jest w niej cały trzeci pomiar: najpierw CAŁA karta idzie
 /// pełnym odświeżeniem (`epd_fullclear` + GC16), a dopiero potem jeden prostokąt
@@ -1443,10 +1451,25 @@ const TEST_CARD_SLEEP_S: u64 = 3_600;
 /// identyczne co do bitu — więc każda różnica, jaką widać na szkle, pochodzi
 /// wyłącznie z tego, czym je odświeżono. To jest ta różnica, przez którą odświeżone
 /// fragmentarycznie prostokąty wyglądają na jaśniejsze od tła.
-fn show_test_card(epd: &mut Epd, temperature_c: i32, rotation: Rotation) {
+fn show_bring_up_card(epd: &mut Epd, temperature_c: i32, rotation: Rotation) {
     let fonts = Fonts::embedded();
     let mut canvas = Gray8::new(rotation);
-    let du_box = dashboard::render_test_card(&fonts, &mut canvas);
+
+    // Czyszczenie PRZED narysowaniem czegokolwiek — inaczej mierzylibyśmy stan
+    // panelu po naszym własnym rysowaniu, a nie po samym czyszczeniu.
+    if EXTRA_FULLCLEARS > 0 {
+        let started = std::time::Instant::now();
+        epd.deep_clean(EXTRA_FULLCLEARS, temperature_c);
+        info!(
+            "dodatkowe czyszczenie x{EXTRA_FULLCLEARS}: {} ms",
+            started.elapsed().as_millis()
+        );
+    }
+
+    let du_box = match BRING_UP_CARD {
+        BringUpCard::Uniformity => dashboard::render_uniformity_card(&fonts, &mut canvas),
+        _ => dashboard::render_test_card(&fonts, &mut canvas),
+    };
 
     if let Err(e) = epd.present(&canvas, Refresh::Full, temperature_c) {
         error!("nie mogę wyrysować karty tonów: {e:#}");

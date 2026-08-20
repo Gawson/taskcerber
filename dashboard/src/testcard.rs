@@ -273,3 +273,183 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Karta jednorodności
+// ---------------------------------------------------------------------------
+
+/// Rysuje kartę jednorodności tła.
+///
+/// # Po co osobna karta
+///
+/// Na panelu widać jaśniejsze pasy, także na dużych pustych powierzchniach. To jest
+/// istotne samo w sobie: **w obszarze, który się nie zmienia, epdiy nie wysyła
+/// żadnego przebiegu** — różnica względem `back_fb` jest zerowa, więc piksel nie
+/// dostaje impulsu. Cokolwiek tam widać, jest fizycznym stanem panelu zostawionym
+/// przez czyszczenie, a nie skutkiem rysowania.
+///
+/// Zegar magistrali został wykluczony (10 i 20 MHz dają identyczny obraz), więc
+/// zostają dwie hipotezy i ta karta je rozdziela:
+///
+/// 1. **Nieskasowana historia.** Panel pamięta poprzednie odświeżenia częściowe,
+///    a `epd_fullclear` nie doprowadza go z powrotem do jednorodnego stanu. Wtedy
+///    pasy powinny słabnąć po kolejnych czyszczeniach — od tego jest
+///    `EXTRA_FULLCLEARS` w firmware.
+/// 2. **Niejednorodność samego szkła.** Wtedy nie ruszą się po żadnej liczbie
+///    czyszczeń i pozostaje z nimi żyć albo szukać po stronie VCOM.
+///
+/// # Czego nie wiedziałem, a karta mówi wprost
+///
+/// W którą stronę te pasy biegną. Płótno jest pionowe, panel skanuje poziomo,
+/// a zdjęcie jest zrobione pod kątem — z tego nie da się pewnie odczytać, czy pas
+/// leży wzdłuż linii bramkowej, czy w poprzek. Karta ma podziałki **opisane we
+/// współrzędnych PANELU**, więc pozycję i rozstaw pasów odczytuje się wprost.
+///
+/// Przy orientacji pionowej `panel_x = canvas_y`, a `panel_y = 539 - canvas_x`
+/// — patrz `Gray8::panel_sample`.
+pub fn render_uniformity_card(fonts: &Fonts, c: &mut Gray8) -> Rect {
+    c.clear(WHITE);
+    let w = c.width() as i32;
+    let h = c.height() as i32;
+
+    fonts.draw(
+        c,
+        "jednorodność tła",
+        56.0,
+        30.0,
+        26.0,
+        Weight::Bold,
+        BLACK,
+        Align::Left,
+    );
+    fonts.draw(
+        c,
+        "podziałki we współrzędnych PANELU",
+        56.0,
+        52.0,
+        19.0,
+        Weight::Medium,
+        BLACK,
+        Align::Left,
+    );
+
+    // --- Podziałka wzdłuż canvas_y = oś X panelu (960 px) -------------------
+    //
+    // Na szkle ta podziałka leży POZIOMO, czyli wzdłuż linii bramkowej.
+    let ruler_x = 30;
+    for panel_x in (0..960).step_by(20) {
+        let cy = panel_x; // panel_x = canvas_y
+        if cy >= h {
+            break;
+        }
+        let long = panel_x % 100 == 0;
+        let len = if long { 16 } else { 7 };
+        for k in 0..len {
+            c.set(ruler_x + k, cy, BLACK);
+        }
+        if long && panel_x > 0 {
+            fonts.draw(
+                c,
+                &format!("{panel_x}"),
+                (ruler_x + 20) as f32,
+                (cy + 7) as f32,
+                19.0,
+                Weight::Medium,
+                BLACK,
+                Align::Left,
+            );
+        }
+    }
+
+    // --- Podziałka wzdłuż canvas_x = oś Y panelu (540 px, odwrócona) --------
+    //
+    // Na szkle leży PIONOWO, czyli w poprzek linii bramkowych.
+    let ruler_y = h - 30;
+    for panel_y in (0..540).step_by(20) {
+        let cx = 539 - panel_y; // panel_y = 539 - canvas_x
+        if !(0..w).contains(&cx) {
+            continue;
+        }
+        let long = panel_y % 100 == 0;
+        let len = if long { 16 } else { 7 };
+        for k in 0..len {
+            c.set(cx, ruler_y + k, BLACK);
+        }
+        if long && panel_y > 0 {
+            fonts.draw(
+                c,
+                &format!("{panel_y}"),
+                cx as f32,
+                (ruler_y - 6) as f32,
+                19.0,
+                Weight::Medium,
+                BLACK,
+                Align::Center,
+            );
+        }
+    }
+
+    // --- Legenda osi -------------------------------------------------------
+    //
+    // Bez tego zdjęcie pod kątem nie rozstrzyga niczego.
+    fonts.draw(
+        c,
+        "^ ta oś to X panelu: WZDŁUŻ linii bramkowej",
+        60.0,
+        h as f32 - 112.0,
+        19.0,
+        Weight::Medium,
+        BLACK,
+        Align::Left,
+    );
+    fonts.draw(
+        c,
+        "> ta oś to Y panelu: W POPRZEK linii",
+        60.0,
+        h as f32 - 90.0,
+        19.0,
+        Weight::Medium,
+        BLACK,
+        Align::Left,
+    );
+
+    // --- Trzy plamy ditheru ------------------------------------------------
+    //
+    // Jeśli pas przechodzi także przez teksturę, moduluje ją tak samo jak biel —
+    // czyli siedzi w panelu, a nie w tym, co wysyłamy.
+    let patch = 92;
+    let py0 = 150;
+    for (i, d) in [1u8, 2, 4].iter().enumerate() {
+        let x = 106 + i as i32 * (patch + 24);
+        if x + patch > w - 20 {
+            break;
+        }
+        dither_rect(c, Rect::new(x, py0, patch, patch), *d);
+        fonts.draw(
+            c,
+            &format!("{d}/16"),
+            (x + patch / 2) as f32,
+            (py0 + patch + 20) as f32,
+            19.0,
+            Weight::Medium,
+            BLACK,
+            Align::Center,
+        );
+    }
+
+    // --- Reszta zostaje BIELĄ i to jest cała treść tej karty ----------------
+    let du = Rect::new(60, h - 300, w - 120, 90);
+    stroke_round_rect(c, du, 6.0, 2, BLACK);
+    fonts.draw(
+        c,
+        "DU",
+        (du.x + du.w / 2) as f32,
+        (du.y + du.h / 2 + 8) as f32,
+        22.0,
+        Weight::Medium,
+        BLACK,
+        Align::Center,
+    );
+
+    du
+}

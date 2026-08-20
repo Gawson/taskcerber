@@ -30,6 +30,8 @@ use dashboard::{render, render_setup, Action, Fonts, Gray8, Model, Rotation, Set
 enum Scene {
     /// Karta tonów — nie ma modelu, rysuje się sama.
     TestCard,
+    /// Karta jednorodności tła.
+    Uniformity,
     Dash(Box<Model>),
     Config(Box<Setup>),
 }
@@ -89,6 +91,7 @@ fn main() {
             ),
         ],
         "tony" | "testcard" => vec![("tony", Scene::TestCard)],
+        "jednorodnosc" | "uniformity" => vec![("jednorodnosc", Scene::Uniformity)],
         "detail" => vec![("detail", {
             let mut m = scenario_week();
             m.focus = Some(1);
@@ -107,6 +110,10 @@ fn main() {
             Scene::Config(setup) => render_setup(setup, &fonts, &mut canvas).hits.len(),
             Scene::TestCard => {
                 dashboard::render_test_card(&fonts, &mut canvas);
+                0
+            }
+            Scene::Uniformity => {
+                dashboard::render_uniformity_card(&fonts, &mut canvas);
                 0
             }
         };

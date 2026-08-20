@@ -47,14 +47,15 @@ use crate::i2c::I2cBus;
 /// przy której `line_front_porch = 4` takty mogą nie wystarczać na ustalenie się
 /// poziomów na wyjściach sterowników źródłowych.
 ///
-/// Ustawienie `Some(10)` cofa dokładnie tę jedną zmienną, przy wszystkim innym bez
-/// zmian. Jeśli pasy znikną — mamy winowajcę i trzeba wybrać między prędkością
-/// odświeżania a jednorodnością tła. Jeśli zostaną — trop jest zły i szukamy dalej.
+/// **Sprawdzone 2026-08-20: przy 10 MHz pasy są IDENTYCZNE.** Magistrala nie ma
+/// z tym nic wspólnego i ten trop jest zamknięty — zegar wraca na deklarowane
+/// 20 MHz. Przełącznik zostaje, bo koszt jest zerowy, a przy następnej zagadce
+/// z obrazem to pierwsza rzecz, którą warto wykluczyć jednym wgraniem.
 ///
 /// **Koszt**: czas odświeżania jest wprost proporcjonalny do okresu linii, więc przy
 /// 10 MHz wszystko trwa DWA RAZY dłużej — DU ~68 ms zamiast ~35, pełne odświeżenie
 /// ~1,8 s zamiast ~0,9.
-const PANEL_BUS_MHZ: Option<i32> = Some(10);
+const PANEL_BUS_MHZ: Option<i32> = None;
 
 /// Do ilu pikseli wyrównujemy obszar częściowego odświeżenia. Patrz
 /// [`Epd::present_area`].
@@ -451,6 +452,27 @@ impl Epd {
         }
         canvas.pack4_rect(fb, area);
         Ok(())
+    }
+
+    /// Powtarza `epd_fullclear` wskazaną liczbę razy, na jednym podniesieniu szyn.
+    ///
+    /// Narzędzie bring-upowe do jednego konkretnego pytania: **czy jaśniejsze pasy
+    /// na tle da się w ogóle skasować?** Jeśli słabną z każdym przebiegiem, to jest
+    /// nieskasowana historia poprzednich odświeżeń częściowych i trzeba czyścić
+    /// agresywniej. Jeśli po pięciu przebiegach wyglądają tak samo — siedzą
+    /// w szkle albo w VCOM-ie i czyszczeniem się ich nie ruszy.
+    ///
+    /// Jedno wywołanie to 96 przelotów przez wszystkie bramki, czyli ~0,7 s.
+    pub fn deep_clean(&mut self, times: u32, temperature_c: i32) {
+        if times == 0 {
+            return;
+        }
+        self.power_on();
+        for _ in 0..times {
+            // SAFETY: epdiy zainicjalizowane, szyny podniesione.
+            unsafe { sys::epd_fullclear(&mut self.hl, temperature_c) };
+        }
+        self.power_off();
     }
 
     /// Gasi szyny panelu. Wołane w sekwencji przed snem, na wypadek gdyby
