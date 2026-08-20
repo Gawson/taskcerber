@@ -54,6 +54,7 @@ impl<'a> Wifi<'a> {
                 password,
                 Some(state.ap_bssid),
                 Some(state.ap_channel),
+                CONNECT_TIMEOUT.saturating_sub(started.elapsed()),
             ) {
                 Ok(()) => {
                     info!("połączono z bufora w {} ms", started.elapsed().as_millis());
@@ -67,7 +68,14 @@ impl<'a> Wifi<'a> {
             }
         }
 
-        Self::try_connect(&mut wifi, ssid, password, None, None)
+        // Druga próba dostaje to, co ZOSTAŁO — nie świeże osiem sekund. Komentarz
+        // przy `CONNECT_TIMEOUT` mówi wprost: limit dotyczy całego podłączenia
+        // i nie wolno go powtarzać w obrębie jednego wybudzenia.
+        let left = CONNECT_TIMEOUT.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            bail!("budżet {CONNECT_TIMEOUT:?} na podłączenie wyczerpany przez zapamiętany AP");
+        }
+        Self::try_connect(&mut wifi, ssid, password, None, None, left)
             .context("nie mogę połączyć się z siecią")?;
 
         // Zapamiętaj, z czym się udało.
@@ -86,12 +94,17 @@ impl<'a> Wifi<'a> {
         Ok(Self { inner: wifi })
     }
 
+    /// Jedna próba asocjacji, ograniczona `budget`.
+    ///
+    /// `budget` jest tym, co ZOSTAŁO z całego limitu na podłączenie — nie limitem
+    /// na tę próbę. Dzięki temu druga próba nie może podwoić czasu.
     fn try_connect(
         wifi: &mut BlockingWifi<EspWifi<'_>>,
         ssid: &str,
         password: &str,
         bssid: Option<[u8; 6]>,
         channel: Option<u8>,
+        budget: Duration,
     ) -> Result<()> {
         let ssid = ssid
             .try_into()
@@ -112,15 +125,27 @@ impl<'a> Wifi<'a> {
             ..Default::default()
         }))?;
 
+        let deadline = Instant::now() + budget;
+
         wifi.start().context("nie mogę wystartować WiFi")?;
         wifi.connect().context("asocjacja nie powiodła się")?;
 
-        let deadline = Instant::now() + CONNECT_TIMEOUT;
-        wifi.wait_netif_up()
-            .context("interfejs sieciowy nie wstał")?;
-        if Instant::now() > deadline {
-            bail!("przekroczono limit czasu na uzyskanie adresu");
+        // `BlockingWifi::wait_netif_up` ma WŁASNY limit 15 s zaszyty w esp-idf-svc
+        // i nie przyjmuje naszego. Wcześniej stało tu właśnie ono, a nasz `deadline`
+        // był sprawdzany DOPIERO PO POWROCIE — czyli nie ograniczał niczego, tylko
+        // meldował, że czas już minął. Przy dwóch próbach (zapamiętany AP, potem
+        // zwykłe wyszukiwanie) dawało to minutę stania na samym WiFi, przy ośmiu
+        // sekundach obiecanych w dokumentacji tej stałej.
+        //
+        // `ip_wait_while` to ta sama funkcja, do której `wait_netif_up` deleguje,
+        // tylko przyjmuje limit — więc podajemy nasz, i to ten, który ZOSTAŁ.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("budżet na podłączenie wyczerpany przed uzyskaniem adresu");
         }
+        let w: &BlockingWifi<EspWifi<'_>> = wifi;
+        w.ip_wait_while(|| w.is_up().map(|up| !up), Some(left))
+            .context("interfejs sieciowy nie wstał w wyznaczonym czasie")?;
         Ok(())
     }
 
