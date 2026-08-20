@@ -31,6 +31,31 @@ use esp_idf_svc::sys;
 
 use crate::i2c::I2cBus;
 
+/// Zegar magistrali danych panelu w MHz. `None` = zostaw to, co deklaruje epdiy.
+///
+/// # Po co to jest przestawialne
+///
+/// Rzecz na czas bring-upu, jak `SLEEP_MARKER` w `main`. Na zdjęciach panelu widać
+/// **jaśniejsze pasy biegnące prostopadle do linii bramkowych** — czyli na stałych
+/// pozycjach w ścieżce danych, a nie za treścią. To wyklucza duchy po poprzednim
+/// obrazie i wskazuje na magistralę.
+///
+/// Podejrzenie jest konkretne: `ED047TC1` deklaruje `bus_speed = 20`, ale dopóki
+/// linia cache'u danych była domyślna (32 B), epdiy **po cichu połowiło zegar do
+/// 10 MHz** (`lcd_driver.c`). Ustawienie `CONFIG_ESP32S3_DATA_CACHE_LINE_64B`
+/// odblokowało pełne 20 MHz — i dopiero od tego momentu panel jedzie z prędkością,
+/// przy której `line_front_porch = 4` takty mogą nie wystarczać na ustalenie się
+/// poziomów na wyjściach sterowników źródłowych.
+///
+/// Ustawienie `Some(10)` cofa dokładnie tę jedną zmienną, przy wszystkim innym bez
+/// zmian. Jeśli pasy znikną — mamy winowajcę i trzeba wybrać między prędkością
+/// odświeżania a jednorodnością tła. Jeśli zostaną — trop jest zły i szukamy dalej.
+///
+/// **Koszt**: czas odświeżania jest wprost proporcjonalny do okresu linii, więc przy
+/// 10 MHz wszystko trwa DWA RAZY dłużej — DU ~68 ms zamiast ~35, pełne odświeżenie
+/// ~1,8 s zamiast ~0,9.
+const PANEL_BUS_MHZ: Option<i32> = Some(10);
+
 /// Do ilu pikseli wyrównujemy obszar częściowego odświeżenia. Patrz
 /// [`Epd::present_area`].
 const AREA_ALIGN: i32 = 8;
@@ -84,6 +109,39 @@ pub enum Refresh {
 /// Ile odświeżeń [`Refresh::Fast`] wolno zrobić, zanim wymusimy pełne.
 pub const FAST_REFRESHES_BEFORE_FULL: u8 = 12;
 
+/// Definicja panelu przekazywana do `epd_init_with_config`.
+///
+/// Zwraca wprost statyk epdiy, chyba że [`PANEL_BUS_MHZ`] każe przestawić zegar —
+/// wtedy oddaje własną kopię z podmienioną jedną wartością.
+///
+/// # Dlaczego to musi być `'static`, a nie zmienna lokalna
+///
+/// `epd_init_with_config` NIE kopiuje struktury, tylko zapamiętuje wskaźnik
+/// (`display = disp;` w `epdiy.c`), a `epd_lcd_init` czyta z niego `bus_speed`
+/// przy każdym przeliczaniu taktowania. Struktura na stosie zwisłaby natychmiast
+/// po powrocie z tej funkcji. `Box::leak` jest tu właściwym narzędziem, a nie
+/// obejściem: obiekt ma żyć do końca działania programu, `Epd` istnieje w jednym
+/// egzemplarzu, a urządzenie i tak kończy pracę deep sleepem, który zeruje RAM.
+fn display_definition() -> &'static sys::EpdDisplay_t {
+    // SAFETY: `ED047TC1` to stała inicjalizowana przed startem programu.
+    let base = unsafe { std::ptr::read(std::ptr::addr_of!(sys::ED047TC1)) };
+
+    match PANEL_BUS_MHZ {
+        Some(mhz) if mhz != base.bus_speed => {
+            log::warn!(
+                "zegar magistrali panelu przestawiony z {} na {mhz} MHz — bring-up, \
+                 odświeżanie będzie proporcjonalnie wolniejsze",
+                base.bus_speed
+            );
+            let mut over = base;
+            over.bus_speed = mhz;
+            Box::leak(Box::new(over))
+        }
+        // SAFETY: bierzemy adres stałej o statycznym czasie życia.
+        _ => unsafe { &*std::ptr::addr_of!(sys::ED047TC1) },
+    }
+}
+
 pub struct Epd {
     hl: sys::EpdiyHighlevelState,
     powered: bool,
@@ -102,6 +160,8 @@ impl Epd {
     pub fn new(bus: &I2cBus) -> Result<Self> {
         // SAFETY: uchwyt magistrali jest ważny i przeżyje epdiy; statyczne symbole
         // `lilygo_board_s3` i `ED047TC1` pochodzą z epdiy.
+        let display = display_definition();
+
         let hl = unsafe {
             let i2c_cfg = sys::EpdI2cConfig {
                 bus_handle: bus.raw(),
@@ -110,7 +170,7 @@ impl Epd {
 
             sys::epd_init_with_config(
                 &sys::lilygo_board_s3,
-                &sys::ED047TC1,
+                display,
                 sys::EpdInitOptions_EPD_LUT_1K,
                 &init_cfg,
             );
