@@ -230,11 +230,8 @@ fn run(mut state: RtcState) -> Result<u64> {
     // zawiodła, powtarzanie życzenia sprzed godziny nie jest już tym, o co ktoś prosił.
     } else if requested || (policy.should_fetch(mode) && !matches!(mode, Mode::Night)) {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
-        let mut trace = if NET_TRACE_ON_PANEL && power_status.usb_present {
-            NetTrace::begin(&mut epd, rotation, temperature)
-        } else {
-            None
-        };
+        let mut trace = (NET_TRACE_ON_PANEL && power_status.usb_present)
+            .then(|| NetTrace::begin(rotation, temperature));
         match fetch_everything(
             peripherals.modem,
             sysloop,
@@ -446,54 +443,73 @@ fn run(mut state: RtcState) -> Result<u64> {
 /// to brownout — i reset w trakcie odświeżania z podniesionymi szynami TPS65185
 /// jest jedyną naprawdę szkodliwą awarią tej płytki.
 ///
-/// Ta reguła chroni OGNIWO. Na kablu prądu wystarcza, a radio i tak wstaje teraz
-/// wyłącznie przy USB (patrz [`RADIO_ONLY_ON_USB`]), więc podczas bring-upu można
-/// rysować w trakcie. Na baterii ten ślad się NIE WŁĄCZA i to nie jest opcja.
+/// Ta reguła chroni OGNIWO. Na kablu prądu zwykle wystarcza, a radio i tak wstaje
+/// teraz wyłącznie przy USB (patrz [`RADIO_ONLY_ON_USB`]), więc podczas bring-upu
+/// można rysować w trakcie. Na baterii ten ślad się NIE WŁĄCZA i to nie jest opcja.
+///
+/// # Ale i tak trzeba go trzymać tanio
+///
+/// Pierwsza wersja czyściła panel PEŁNYM odświeżeniem — 35 przelotów przez wszystkie
+/// bramki, każdy piksel napędzany — i robiła to tuż przed podniesieniem radia. Na
+/// sprzęcie objawiło się to migotaniem czerni i resetami w losowych miejscach kroku
+/// sieciowego, czyli dokładnie tym, przed czym nagłówek ostrzega. Narzędzie
+/// diagnostyczne zaburzało to, co mierzy.
+///
+/// Teraz nie ma ani czyszczenia, ani pełnego odświeżenia: każdy krok to jeden wiersz
+/// i jedno odświeżenie CZĘŚCIOWE. `back_fb` epdiy jest po wybudzeniu biały, więc
+/// różnicą są wyłącznie czarne piksele napisu — reszta panelu nie dostaje impulsu.
+/// Kroki nadpisują to, co akurat jest na szkle, i to jest świadoma cena za to, żeby
+/// pomiar nie zmieniał wyniku.
 struct NetTrace {
     canvas: Gray8,
     fonts: Fonts<'static>,
     rotation: Rotation,
     temperature_c: i32,
     band: dashboard::Rect,
+    line: i32,
     started: std::time::Instant,
 }
 
 impl NetTrace {
-    /// Czyści panel i przygotowuje pas na komunikaty.
-    ///
-    /// Pełne odświeżenie na wejściu jest konieczne, nie ozdobne: `back_fb` epdiy
-    /// powstaje wyzerowany do bieli i nie wie nic o tym, co zostało na szkle, więc
-    /// bez niego kolejne odświeżenia częściowe rysowałyby różnicę z niewłaściwego
-    /// punktu odniesienia.
-    fn begin(epd: &mut Epd, rotation: Rotation, temperature_c: i32) -> Option<Self> {
+    /// Ile kroków mieści się w pasie, zanim zacznie się od góry.
+    const LINES: i32 = 10;
+    /// Wysokość jednego wiersza kroku.
+    const LINE_H: i32 = 26;
+
+    fn begin(rotation: Rotation, temperature_c: i32) -> Self {
         let fonts = Fonts::embedded();
-        let mut canvas = Gray8::new(rotation);
+        let canvas = Gray8::new(rotation);
         let w = canvas.width() as i32;
         let h = canvas.height() as i32;
+        let band_h = Self::LINES * Self::LINE_H;
 
-        dashboard::layout::render_net_trace(&fonts, &mut canvas);
-        if let Err(e) = epd.present(&canvas, Refresh::Full, temperature_c) {
-            error!("nie mogę wyczyścić panelu pod ślad sieciowy: {e:#}");
-            return None;
-        }
-
-        Some(Self {
+        Self {
             canvas,
             fonts,
             rotation,
             temperature_c,
-            band: dashboard::Rect::new(0, h / 2 - 30, w, 60),
+            band: dashboard::Rect::new(0, (h - band_h) / 2, w, band_h),
+            line: 0,
             started: std::time::Instant::now(),
-        })
+        }
     }
 
-    /// Wypisuje jeden krok i wypycha sam pas.
+    /// Dopisuje krok i wypycha SAM jego wiersz.
+    ///
+    /// Bez czyszczenia i bez pełnego odświeżenia: kroki nadpisują to, co akurat jest
+    /// na szkle, i to jest świadoma cena. `back_fb` epdiy jest po wybudzeniu biały,
+    /// więc różnicą są wyłącznie czarne piksele napisu — reszta panelu nie dostaje
+    /// ani jednego impulsu. Jeden wiersz to jedno odświeżenie częściowe, pięć faz.
     fn step(&mut self, epd: &mut Epd, co: &str) {
         let ms = self.started.elapsed().as_millis();
         info!("krok5[{ms} ms]: {co}");
 
-        dashboard::layout::draw_net_step(&self.fonts, &mut self.canvas, self.band, co, ms);
-        let area = self.rotation.canvas_rect_to_panel(self.band);
+        let y = self.band.y + (self.line % Self::LINES) * Self::LINE_H;
+        let row = dashboard::Rect::new(self.band.x, y, self.band.w, Self::LINE_H);
+        self.line += 1;
+
+        dashboard::layout::draw_net_step(&self.fonts, &mut self.canvas, row, co, ms);
+        let area = self.rotation.canvas_rect_to_panel(row);
         if let Err(e) = epd.present_area(&self.canvas, area, self.temperature_c) {
             warn!("nie mogę wypisać kroku na panel: {e:#}");
         }
