@@ -380,9 +380,13 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
     } else {
         Action::RefreshNow
     };
-    screen.hits.push(HitRegion::new(
+    // Cel dotykowy jest większy od plakietki, ale mignąć ma sama plakietka — patrz
+    // [`Visual`]. Promień 8 zgadza się ze `stroke_round_rect` wyżej.
+    screen.hits.push(HitRegion::shaped(
         Rect::new(pill.x - 10, pill.y - 6, pill.w + 20, pill.h + 12),
         pill_action,
+        pill,
+        8,
     ));
 
     hline(c, g.margin, g.header_h, g.w - 2 * g.margin, 3, BLACK);
@@ -717,7 +721,9 @@ fn draw_setup_cta(fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
         Align::Center,
     );
 
-    screen.hits.push(HitRegion::new(rect, Action::OpenSetup));
+    // Promień 14 zgadza się ze `stroke_round_rect` wyżej — bez tego przycisk zapalał
+    // się pod palcem jako ostry prostokąt.
+    screen.hits.push(HitRegion::shaped(rect, Action::OpenSetup, rect, 14));
 }
 
 fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {

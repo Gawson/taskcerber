@@ -5,7 +5,7 @@
 //! zaokrąglonego prostokąta to kilkadziesiąt linii, a oszczędza dużą zależność, która
 //! na Xtensie i tak nie ma SIMD i musiałaby przejść przez `esp-idf-sys`.
 
-use crate::canvas::{Gray8, Rect};
+use crate::canvas::{Gray8, Rect, BILEVEL_THRESHOLD, BLACK, WHITE};
 
 /// Wypełnia zaokrąglony prostokąt z antyaliasingiem na łukach.
 ///
@@ -128,6 +128,49 @@ fn round_rect_coverage(px: f32, py: f32, cx0: f32, cx1: f32, cy0: f32, cy1: f32,
     }
     let d = (dx * dx + dy * dy).sqrt();
     (rad + 0.5 - d).clamp(0.0, 1.0)
+}
+
+/// Odwraca zawartość ZAOKRĄGLONEGO prostokąta — dwupoziomowo.
+///
+/// # Dlaczego nie `Gray8::invert_rect`
+///
+/// Mignięcie pod palcem odwracało prostokąt OPISANY na przycisku, więc zaokrąglony
+/// guzik zapalał się jako ostry prostokąt. Kształt musi iść za rysunkiem, a rysunek
+/// zna tylko ten, kto go narysował — stąd promień wędruje w [`crate::hit::Visual`].
+///
+/// # Dlaczego DWUPOZIOMOWO, a nie „255 minus wartość"
+///
+/// To jest drugi błąd w tym samym miejscu i mniej oczywisty. Płótno agendy przechodzi
+/// przez `Gray8::quantize_ink`, więc atrament leży na poziomach 0-4. Odwrócenie przez
+/// odejmowanie przenosi je na poziomy 11-15 — czyli **dokładnie w pasmo, którego panel
+/// nie odróżnia od bieli**. Antyaliasowane krawędzie liter w negatywie po prostu
+/// znikały, a litera robiła się rozmyta i za gruba.
+///
+/// Nie da się tego naprawić lepszym odwzorowaniem: na czarnym tle jasne półtony
+/// musiałyby leżeć blisko bieli, a tam ten panel nie ma ani jednego użytecznego
+/// stopnia. **W negatywie nie ma antyaliasingu, bo nie ma go z czego zrobić.**
+/// Maska narożnika też jest twarda, z tego samego powodu.
+pub fn invert_round_rect(c: &mut Gray8, r: Rect, radius: f32) {
+    if r.w <= 0 || r.h <= 0 {
+        return;
+    }
+    let rad = radius.min(r.w as f32 / 2.0).min(r.h as f32 / 2.0).max(0.0);
+    let cx0 = r.x as f32 + rad;
+    let cx1 = r.right() as f32 - rad;
+    let cy0 = r.y as f32 + rad;
+    let cy1 = r.bottom() as f32 - rad;
+
+    for y in r.y..r.bottom() {
+        let py = y as f32 + 0.5;
+        for x in r.x..r.right() {
+            let px = x as f32 + 0.5;
+            if round_rect_coverage(px, py, cx0, cx1, cy0, cy1, rad) < 0.5 {
+                continue;
+            }
+            let v = c.get(x, y);
+            c.set(x, y, if v < BILEVEL_THRESHOLD { WHITE } else { BLACK });
+        }
+    }
 }
 
 /// Wypełnione koło z antyaliasingiem.

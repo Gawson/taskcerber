@@ -953,7 +953,15 @@ fn interactive_loop(
         // tego, co tam było.
         let slow_or_silent = matches!(action, Action::OpenSetup | Action::RefreshNow);
         let flashed =
-            slow_or_silent && flash_region(epd, &mut canvas, region.rect, rotation, temperature_c);
+            slow_or_silent
+                && flash_region(
+                    epd,
+                    &mut canvas,
+                    region.rect,
+                    region.visual,
+                    rotation,
+                    temperature_c,
+                );
         let mut repainted = false;
 
         match action {
@@ -1054,7 +1062,8 @@ fn interactive_loop(
             let (fresh, fresh_screen) = render_frame(&model, rotation);
             canvas = fresh;
             screen = fresh_screen;
-            let area = rotation.canvas_rect_to_panel(region.rect);
+            let restore = region.visual.map_or(region.rect, |v| v.rect);
+            let area = rotation.canvas_rect_to_panel(restore);
             if let Err(e) = epd.present_area(&canvas, area, temperature_c) {
                 warn!("nie mogę przywrócić obszaru pod palcem: {e:#}");
             }
@@ -1417,13 +1426,23 @@ fn flash_region(
     epd: &mut Epd,
     canvas: &mut Gray8,
     rect: dashboard::Rect,
+    visual: Option<dashboard::Visual>,
     rotation: Rotation,
     temperature_c: i32,
 ) -> bool {
     // Odwrócenie, nie zalanie czernią: pod palcem ma zostać widoczne to, w co
     // użytkownik trafił. Zakryty czarnym prostokątem guzik wygląda jak usterka.
-    canvas.invert_rect(rect);
-    let area = rotation.canvas_rect_to_panel(rect);
+    //
+    // Kształt bierze się z `HitRegion::visual`, nie z obszaru dotykowego. Cel dotyku
+    // bywa celowo większy od rysunku (plakietka statusu ma +10/+6 px, żeby dało się
+    // w nią trafić), a odwracanie prostokąta OPISANEGO zapalało zaokrąglony guzik
+    // jako ostry prostokąt, w dodatku większy od czegokolwiek, co widać.
+    let (shape, radius) = match visual {
+        Some(v) => (v.rect, v.radius as f32),
+        None => (rect, 0.0),
+    };
+    dashboard::shapes::invert_round_rect(canvas, shape, radius);
+    let area = rotation.canvas_rect_to_panel(shape);
     let started = std::time::Instant::now();
     match epd.present_area(canvas, area, temperature_c) {
         Ok(()) => {

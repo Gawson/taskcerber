@@ -28,7 +28,7 @@ pub mod testcard;
 pub mod text;
 
 pub use canvas::{dither_rect, ink_level, Gray8, Rect, Rotation, PACKED_LEN, PANEL_HEIGHT, PANEL_WIDTH};
-pub use hit::{Action, HitRegion, Screen};
+pub use hit::{Action, HitRegion, Screen, Visual};
 pub use layout::{render, render_setup};
 pub use testcard::{render_test_card, render_uniformity_card};
 pub use model::{Battery, CalEvent, DayGroup, Model, NetState, SourceTag, Tile};

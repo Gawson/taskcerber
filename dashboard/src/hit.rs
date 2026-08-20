@@ -43,16 +43,48 @@ pub enum Action {
     Save,
 }
 
+/// Kształt, który pod tym obszarem **narysowano**.
+///
+/// To nie to samo co cel dotykowy i dlatego jest osobno. Cel bywa celowo większy —
+/// plakietka statusu ma obszar rozszerzony o 10 px na boki i 6 px w pionie, żeby
+/// dawało się w nią trafić palcem. Mignięcie ma odwzorować RYSUNEK, nie cel:
+/// odwrócenie prostokąta opisanego zapalało zaokrąglony guzik jako ostry prostokąt,
+/// i to o kilkanaście pikseli większy, niż cokolwiek widać.
+///
+/// Promień jest całkowity, bo `HitRegion` jest `Eq` — a `f32` nie jest. Promienie
+/// w tym układzie i tak są całkowite (8 dla plakietki, 14 dla przycisku).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Visual {
+    pub rect: Rect,
+    pub radius: i32,
+}
+
 /// Prostokąt reagujący na dotyk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HitRegion {
     pub rect: Rect,
     pub action: Action,
+    /// Kształt do mignięcia pod palcem. `None` — obszar nie ma własnego rysunku
+    /// (np. całe tło zamykające szczegóły) i nie ma czym mignąć.
+    pub visual: Option<Visual>,
 }
 
 impl HitRegion {
     pub fn new(rect: Rect, action: Action) -> Self {
-        Self { rect, action }
+        Self {
+            rect,
+            action,
+            visual: None,
+        }
+    }
+
+    /// Obszar dotykowy razem z kształtem, który pod nim narysowano.
+    pub fn shaped(rect: Rect, action: Action, visual: Rect, radius: i32) -> Self {
+        Self {
+            rect,
+            action,
+            visual: Some(Visual { rect: visual, radius }),
+        }
     }
 
     pub fn contains(&self, x: i32, y: i32) -> bool {
