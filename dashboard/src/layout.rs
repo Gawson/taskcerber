@@ -12,7 +12,9 @@
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::canvas::{dither_rect, Gray8, Rect, BLACK, FILL_DARK, INK_DIM, INK_FAINT, WHITE};
+use crate::canvas::{
+    dither_rect, Gray8, Rect, Rotation, BLACK, FILL_DARK, INK_DIM, INK_FAINT, WHITE,
+};
 use crate::hit::{Action, HitRegion, Screen};
 use crate::model::{
     data_dzien_miesiac, dzien_skrot, godzina, naglowek_dnia, za_ile, Battery, CalEvent, Model,
@@ -96,11 +98,59 @@ impl Geom {
 //      To nie jest preferencja estetyczna, tylko wynik pomiaru z karty tonów: od
 //      poziomu 5 w górę litera przestaje być literą, a od 10 nie ma jej wcale.
 //      Cała mechanika i krzywa odpowiedzi — przy palecie w `canvas`.
+//   4. **Tekst w NEGATYWIE (biel na czerni) zawsze `Bold`**, niezależnie od rozmiaru.
+//      `BILEVEL_THRESHOLD` czerni piksel przy pokryciu powyżej 34%, ale bieli dopiero
+//      powyżej 66% — w negatywie kreska chudnie dokładnie tak, jak w pozytywie tyje.
+//      Zmierzone: „strefa" 22 px Medium ma 46% kresek jednopikselowych, Bold — 3%.
 //
 // Konsekwencja, z której trzeba sobie zdawać sprawę projektując: **ton jest tu
 // kanałem o czterech stopniach, nie o szesnastu.** Hierarchię niosą rozmiar
 // i grubość kroju; jasne wypełnienia robi `dither_rect`, nie szarość.
-const STATUS_SIZE: f32 = 25.0;
+// ---------------------------------------------------------------------------
+// Drabina rozmiarów
+// ---------------------------------------------------------------------------
+//
+// Sześć stopni na oba ekrany. Wcześniej w tym pliku było **piętnaście** różnych
+// rozmiarów, przy czym cztery poziomy hierarchii mieściły się w rozpiętości dwóch
+// pikseli (25 / 26 / 26 / 27). Na e-papierze różnica dwóch pikseli jest niewidoczna,
+// więc płaciło się złożonością za hierarchię, której nie widać.
+//
+// Stosunek między stopniami trzyma się ~1,25-1,3, czyli tyle, ile trzeba, żeby skok
+// był widoczny z odległości, z jakiej patrzy się na kalendarz na ścianie.
+//
+// Orientacja: rozmiar zależny od `compact` zostaje TYLKO tam, gdzie poziomy pas
+// naprawdę nie mieści stopnia z pionu — i wtedy obowiązuje jedna zasada,
+// „w kompakcie jeden stopień niżej". Pozostałe warunki zniknęły.
+
+/// Numer dnia. Jedyny element czytelny z drugiego końca pokoju.
+const TEXT_HERO: f32 = 76.0;
+
+/// To, po co się na ten ekran patrzy: tytuł w szczegółach, stan pusty, wpisywana
+/// wartość w pionie.
+const TEXT_TITLE: f32 = 44.0;
+
+/// Nagłówek ekranu i przycisk główny: dzień tygodnia, „Konfiguracja", „Skonfiguruj",
+/// klawisze znakowe.
+const TEXT_HEAD: f32 = 34.0;
+
+/// Treść pierwszoplanowa: tytuł wydarzenia, godzina startu, nagłówek dnia,
+/// etykieta pola.
+const TEXT_LEAD: f32 = 27.0;
+
+/// Drugi plan, czytany z ręki: lokalizacja, jednostka, zakładki, podpowiedź,
+/// lista „zapamiętane", plakietki, pasek klawiatury.
+const TEXT_BODY: f32 = 22.0;
+
+/// **Nie jest stopniem projektowym**, tylko podłogą reguły 1.
+///
+/// Wolno go użyć wyłącznie tam, gdzie tekst ma ISTNIEĆ, a nie być czytany, i gdzie
+/// [`TEXT_BODY`] zmierzalnie nie wchodzi. Dwa takie miejsca: wersja firmware'u
+/// w rogu i nagłówek listy „zapamiętane" — ten drugi ma w pionie **1 px** zapasu
+/// (`HEAD_H` 24 + 6 × 28 = 192 przy 193 dostępnych), więc wyższy nagłówek to
+/// zniknięcie całej listy.
+const TEXT_FLOOR: f32 = 19.0;
+
+const STATUS_SIZE: f32 = TEXT_BODY;
 const STATUS_PAD: i32 = 10;
 const STATUS_PILL_TOP: i32 = 66;
 const STATUS_BASELINE: f32 = 90.0;
@@ -124,7 +174,7 @@ const TILE_VALUE_MIN_SIZE: f32 = 22.0;
 /// **Rezerwacja miejsca niżej MUSI liczyć tymi samymi stałymi.** Gdy liczyła
 /// `20.0, Regular`, a rysunek szedł Medium, najszersza jednostka („jednostek"
 /// ze scenariusza stresowego) wychodziła 1,6 px poza kolumnę kafelka.
-const TILE_UNIT_SIZE: f32 = 20.0;
+const TILE_UNIT_SIZE: f32 = TEXT_BODY;
 const TILE_UNIT_WEIGHT: Weight = Weight::Medium;
 
 const DAY_HEADER_H: i32 = 40;
@@ -299,7 +349,7 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         &day_num,
         g.margin as f32,
         78.0,
-        76.0,
+        TEXT_HERO,
         Weight::Bold,
         BLACK,
         Align::Left,
@@ -311,7 +361,7 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         crate::model::dzien_tygodnia(today),
         x,
         50.0,
-        32.0,
+        TEXT_HEAD,
         Weight::Bold,
         BLACK,
         Align::Left,
@@ -325,7 +375,7 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         ),
         x,
         82.0,
-        26.0,
+        TEXT_LEAD,
         Weight::Medium,
         INK_DIM,
         Align::Left,
@@ -409,7 +459,7 @@ fn draw_battery(b: &Battery, fonts: &Fonts, c: &mut Gray8, x: i32, y: i32) {
             &format!("{pct}%"),
             (x - 10) as f32,
             (y + 21) as f32,
-            22.0,
+            TEXT_BODY,
             Weight::Medium,
             BLACK,
             Align::Right,
@@ -507,12 +557,12 @@ fn draw_day_header(
         &label,
         g.margin as f32,
         baseline,
-        26.0,
+        TEXT_LEAD,
         Weight::Bold,
         BLACK,
         Align::Left,
     );
-    let label_w = fonts.measure(&label, 26.0, Weight::Bold);
+    let label_w = fonts.measure(&label, TEXT_LEAD, Weight::Bold);
 
     let sub = if continued {
         format!(
@@ -528,13 +578,13 @@ fn draw_day_header(
         &sub,
         g.margin as f32 + label_w + 14.0,
         baseline,
-        22.0,
+        TEXT_BODY,
         Weight::Medium,
         BLACK,
         Align::Left,
     );
 
-    let sub_w = fonts.measure(&sub, 22.0, Weight::Medium);
+    let sub_w = fonts.measure(&sub, TEXT_BODY, Weight::Medium);
     let line_x = g.margin + (label_w + sub_w) as i32 + 30;
     let line_w = g.w - g.margin - line_x;
     if line_w > 20 {
@@ -571,7 +621,7 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
     } else {
         godzina(event.start)
     };
-    let time_size = if event.all_day { 20.0 } else { 26.0 };
+    let time_size = if event.all_day { TEXT_BODY } else { TEXT_LEAD };
     let time_weight = if past {
         Weight::Regular
     } else {
@@ -594,7 +644,7 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
             &godzina(event.end),
             g.margin as f32,
             baseline + 20.0,
-            20.0,
+            TEXT_BODY,
             Weight::Medium,
             INK_DIM,
             Align::Left,
@@ -622,7 +672,9 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
 
     if !past && !live && is_first_upcoming(model, event) {
         let badge = za_ile(event.start, now);
-        let bw = fonts.measure(&badge, 20.0, Weight::Medium) as i32 + 24;
+        // Bold, bo to NEGATYW — patrz reguła 4 w nagłówku pliku. Zmierzone:
+        // przy Medium 52% kresek tej plakietki było jednopikselowych, przy Bold 3%.
+        let bw = fonts.measure(&badge, TEXT_BODY, Weight::Bold) as i32 + 24;
         let br = Rect::new(g.w - g.margin - bw, y + 2, bw, 28);
         fill_round_rect(c, br, 14.0, BLACK);
         fonts.draw(
@@ -630,34 +682,34 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
             &badge,
             (br.x + br.w / 2) as f32,
             (br.y + 20) as f32,
-            20.0,
-            Weight::Medium,
+            TEXT_BODY,
+            Weight::Bold,
             WHITE,
             Align::Center,
         );
         avail -= bw + 16;
     }
 
-    let title = fonts.truncate(&event.title, avail as f32, 27.0, Weight::Medium);
+    let title = fonts.truncate(&event.title, avail as f32, TEXT_LEAD, Weight::Medium);
     fonts.draw(
         c,
         &title,
         text_x as f32,
         baseline,
-        27.0,
+        TEXT_LEAD,
         Weight::Medium,
         title_ink,
         Align::Left,
     );
 
     if let Some(loc) = &event.location {
-        let loc = fonts.truncate(loc, avail as f32, 21.0, Weight::Medium);
+        let loc = fonts.truncate(loc, avail as f32, TEXT_BODY, Weight::Medium);
         fonts.draw(
             c,
             &loc,
             text_x as f32,
             baseline + 22.0,
-            21.0,
+            TEXT_BODY,
             Weight::Medium,
             INK_DIM,
             Align::Left,
@@ -705,7 +757,7 @@ fn draw_setup_cta(fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
         "Skonfiguruj",
         (rect.x + rect.w / 2) as f32,
         (rect.y + rect.h / 2 + 12) as f32,
-        34.0,
+        TEXT_HEAD,
         Weight::Bold,
         BLACK,
         Align::Center,
@@ -715,7 +767,7 @@ fn draw_setup_cta(fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
         "sieć i adres kalendarza",
         (rect.x + rect.w / 2) as f32,
         (rect.bottom() + 40) as f32,
-        24.0,
+        TEXT_LEAD,
         Weight::Medium,
         INK_DIM,
         Align::Center,
@@ -735,7 +787,7 @@ fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
         "Nic w planie",
         cx,
         cy,
-        42.0,
+        TEXT_TITLE,
         Weight::Bold,
         INK_DIM,
         Align::Center,
@@ -745,7 +797,7 @@ fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
         "Wolne do końca widocznego okresu",
         cx,
         cy + 36.0,
-        24.0,
+        TEXT_LEAD,
         Weight::Medium,
         INK_DIM,
         Align::Center,
@@ -790,7 +842,7 @@ fn draw_event_detail(
         &when,
         x,
         y as f32,
-        24.0,
+        TEXT_LEAD,
         Weight::Medium,
         INK_DIM,
         Align::Left,
@@ -799,13 +851,21 @@ fn draw_event_detail(
 
     // Tytuł łamany na maksymalnie trzy linie.
     let avail = (g.w - 2 * g.margin) as f32;
-    for line in fonts.wrap(&event.title, avail, 44.0, Weight::Bold, 3) {
+    // Trzy linie mieszczą się tylko w pionie. W poziomie przy tytule na trzy linie
+    // i lokalizacji na dwie czas trwania lądował na linii bazowej 430 — czyli
+    // W ŚRODKU przycisku „Wróć" (`Rect(32, 388, 180, 44)`). To jest naprawa
+    // istniejącego błędu, nie koszt tej zmiany.
+    let title_lines = match c.rotation() {
+        Rotation::Portrait => 3,
+        Rotation::Landscape => 2,
+    };
+    for line in fonts.wrap(&event.title, avail, TEXT_TITLE, Weight::Bold, title_lines) {
         fonts.draw(
             c,
             &line,
             x,
             y as f32,
-            44.0,
+            TEXT_TITLE,
             Weight::Bold,
             BLACK,
             Align::Left,
@@ -815,14 +875,16 @@ fn draw_event_detail(
 
     if let Some(loc) = &event.location {
         y += 10;
-        for line in fonts.wrap(loc, avail, 26.0, Weight::Regular, 2) {
+        // Medium, nie Regular: 26 px to sama granica reguły 2, a `INK_DIM` dodatkowo
+        // odbiera kresce atrament. Rozmiar bez zmian — sam krój.
+        for line in fonts.wrap(loc, avail, TEXT_LEAD, Weight::Medium, 2) {
             fonts.draw(
                 c,
                 &line,
                 x,
                 y as f32,
-                26.0,
-                Weight::Regular,
+                TEXT_LEAD,
+                Weight::Medium,
                 INK_DIM,
                 Align::Left,
             );
@@ -849,7 +911,7 @@ fn draw_event_detail(
             &dur,
             x,
             y as f32,
-            24.0,
+            TEXT_BODY,
             Weight::Medium,
             INK_DIM,
             Align::Left,
@@ -872,7 +934,7 @@ fn draw_event_detail(
         "Wróć",
         (back.x + 62) as f32,
         (back.y + 29) as f32,
-        24.0,
+        TEXT_BODY,
         Weight::Medium,
         BLACK,
         Align::Left,
@@ -914,7 +976,7 @@ fn draw_footer(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
             &model.firmware,
             g.margin as f32,
             (g.h - 8) as f32,
-            19.0,
+            TEXT_FLOOR,
             Weight::Medium,
             INK_DIM,
             Align::Left,
@@ -994,7 +1056,7 @@ fn draw_pager(model: &Model, screen: &mut Screen, fonts: &Fonts, c: &mut Gray8, 
         &label,
         g.w as f32 / 2.0,
         (top + g.footer_h - 14) as f32,
-        20.0,
+        TEXT_BODY,
         Weight::Medium,
         INK_DIM,
         Align::Center,
@@ -1013,13 +1075,13 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
     for (i, tile) in model.tiles.iter().take(n).enumerate() {
         let x = g.margin + i as i32 * (tw + gap);
 
-        let label = fonts.truncate(&tile.label.to_uppercase(), tw as f32, 20.0, Weight::Medium);
+        let label = fonts.truncate(&tile.label.to_uppercase(), tw as f32, TEXT_BODY, Weight::Medium);
         fonts.draw(
             c,
             &label,
             x as f32,
             (top + 30) as f32,
-            20.0,
+            TEXT_BODY,
             Weight::Medium,
             INK_DIM,
             Align::Left,
@@ -1245,7 +1307,8 @@ fn draw_setup_head(
         "Konfiguracja",
         m as f32,
         g.title_base,
-        if g.compact { 26.0 } else { 32.0 },
+        // Zostaje warunkowy: w poziomie nagłówek dzieli pas z zakładkami.
+        if g.compact { TEXT_LEAD } else { TEXT_HEAD },
         Weight::Bold,
         BLACK,
         Align::Left,
@@ -1253,7 +1316,7 @@ fn draw_setup_head(
 
     // Po prawej stronie tytułu: czego jeszcze brakuje. To jedyne miejsce, w którym
     // widać postęp — zakładek jest sześć i cztery z nich są opcjonalne.
-    let status_size = if g.compact { 20.0 } else { 22.0 };
+    let status_size = TEXT_BODY;
     let (status, ink) = match setup.first_missing() {
         Some(field) => (format!("brakuje: {}", field.tab()), BLACK),
         None => ("komplet — naciśnij zapisz".to_string(), INK_DIM),
@@ -1275,7 +1338,7 @@ fn draw_setup_head(
     let count = Field::ALL.len() as i32;
     let tab_gap = 8;
     let tab_w = (g.w - 2 * m - (count - 1) * tab_gap) / count;
-    let tab_size = if g.compact { 19.0 } else { 22.0 };
+    let tab_size = TEXT_BODY;
 
     for (i, field) in Field::ALL.into_iter().enumerate() {
         let r = Rect::new(m + i as i32 * (tab_w + tab_gap), g.tabs_y, tab_w, g.tab_h);
@@ -1294,7 +1357,20 @@ fn draw_setup_head(
         } else {
             field.tab().to_string()
         };
-        let label = fonts.truncate(&label, (tab_w - 12) as f32, tab_size, Weight::Medium);
+        // Aktywna zakładka jest w NEGATYWIE, więc Bold — reguła 4. Dziś miała
+        // najmniej atramentu ze wszystkich sześciu, czyli hierarchia była odwrócona:
+        // 46% kresek jednopikselowych przy Medium, 3% przy Bold.
+        //
+        // Warunkowo, nie na wszystkich: efekt ma być RÓŻNICOWY. Gdyby nieaktywne
+        // rosły razem z aktywną, różnica by zniknęła.
+        let tab_weight = if active {
+            Weight::Bold
+        } else {
+            Weight::Medium
+        };
+        // Ten sam krój do mierzenia i do rysowania — rozjazd tej pary to dokładnie
+        // ta klasa błędu, którą opisuje komentarz przy `TILE_UNIT_SIZE`.
+        let label = fonts.truncate(&label, (tab_w - 12) as f32, tab_size, tab_weight);
 
         fonts.draw(
             c,
@@ -1302,7 +1378,7 @@ fn draw_setup_head(
             (r.x + r.w / 2) as f32,
             (r.y + r.h / 2) as f32 + tab_size * 0.36,
             tab_size,
-            Weight::Medium,
+            tab_weight,
             if active { WHITE } else { BLACK },
             Align::Center,
         );
@@ -1331,7 +1407,7 @@ fn draw_edit_field(
         setup.field().label(),
         m as f32,
         g.label_base,
-        if g.compact { 20.0 } else { 24.0 },
+        TEXT_LEAD,
         Weight::Medium,
         INK_DIM,
         Align::Left,
@@ -1343,7 +1419,8 @@ fn draw_edit_field(
     // odświeżenia, a urwana krawędź ramki wyglądałaby jak artefakt.
     screen.edit_box = Some(Rect::new(boxr.x - 4, boxr.y - 4, boxr.w + 8, boxr.h + 8));
 
-    let size = if g.compact { 30.0 } else { 38.0 };
+    // Zostaje warunkowy: ramka wartości ma w poziomie 64 px zamiast 86.
+    let size = if g.compact { TEXT_HEAD } else { TEXT_TITLE };
     let pad = 14;
     // 10 px zapasu na kursor, żeby nie wylazł za ramkę przy pełnym polu.
     let avail = (boxr.w - 2 * pad - 10) as f32;
@@ -1372,20 +1449,23 @@ fn draw_edit_field(
         BLACK,
     );
 
-    let hint_size = if g.compact { 18.0 } else { 21.0 };
+    // 18 px Regular było najgorszym miejscem w całym pliku: 55% kresek tego napisu
+    // wychodziło jednopikselowych, czyli dokładnie „cienkie i wypłowiałe" ze
+    // zgłoszenia. Przy 22 px Medium zostaje 4%, a atramentu jest 781 px zamiast 432.
+    // Warunek na orientację znika — 22 px mieści się w obu.
     let hint = fonts.truncate(
         setup.field().hint(),
         (g.w - 2 * m) as f32,
-        hint_size,
-        Weight::Regular,
+        TEXT_BODY,
+        Weight::Medium,
     );
     fonts.draw(
         c,
         &hint,
         m as f32,
         g.hint_base,
-        hint_size,
-        Weight::Regular,
+        TEXT_BODY,
+        Weight::Medium,
         INK_DIM,
         Align::Left,
     );
@@ -1483,7 +1563,7 @@ fn draw_setup_summary(
         "zapamiętane",
         m as f32,
         (top + 12) as f32,
-        19.0,
+        TEXT_FLOOR,
         Weight::Medium,
         INK_DIM,
         Align::Left,
@@ -1494,10 +1574,13 @@ fn draw_setup_summary(
         let y = top + HEAD_H + i as i32 * row_h;
         let baseline = (y + row_h / 2) as f32 + 6.0;
         let active = field == setup.field();
+        // Regular przy 20 px łamał regułę 2 na PIĘCIU z sześciu wierszy — zmierzone:
+        // „Dom-WiFi-5GHz" miało 40% kresek jednopikselowych. Wiersz aktywny idzie
+        // o stopień wyżej, żeby różnica została; nośnikiem jest krój, nie ton.
         let weight = if active {
-            Weight::Medium
+            Weight::Bold
         } else {
-            Weight::Regular
+            Weight::Medium
         };
 
         fonts.draw(
@@ -1505,20 +1588,20 @@ fn draw_setup_summary(
             field.tab(),
             m as f32,
             baseline,
-            20.0,
+            TEXT_BODY,
             weight,
             if active { BLACK } else { INK_DIM },
             Align::Left,
         );
 
         let value = summary_value(setup, field);
-        let value = fonts.truncate(&value, (g.w - 2 * m - LABEL_W) as f32, 20.0, weight);
+        let value = fonts.truncate(&value, (g.w - 2 * m - LABEL_W) as f32, TEXT_BODY, weight);
         fonts.draw(
             c,
             &value,
             (m + LABEL_W) as f32,
             baseline,
-            20.0,
+            TEXT_BODY,
             weight,
             BLACK,
             Align::Left,
@@ -1586,7 +1669,8 @@ fn draw_keyboard_filtered(
     let wanted = |r: Rect| only.is_none_or(|list| list.contains(&r));
     let rows = setup.page().rows();
     let caps = setup.caps().is_active();
-    let size = if g.compact { 24.0 } else { 28.0 };
+    // Zostaje warunkowy: klawisz ma w poziomie 52 px wysokości zamiast 78.
+    let size = if g.compact { TEXT_LEAD } else { TEXT_HEAD };
 
     for (r, row) in rows.iter().enumerate() {
         let n = row.chars().count() as i32;
@@ -1628,7 +1712,7 @@ fn draw_keyboard_filtered(
     let bar_y = g.kb_top + rows.len() as i32 * (g.key_h + g.gap);
     let bar_w = 10 * g.unit + 9 * g.gap;
     let mut x = (g.w - bar_w) / 2;
-    let bar_size = if g.compact { 19.0 } else { 21.0 };
+    let bar_size = TEXT_BODY;
 
     let caps_style = match setup.caps() {
         Caps::Off => KeyStyle::Normal,
@@ -1751,8 +1835,11 @@ mod tests {
         // obie — gdyby kiedyś przestała, test ma to zauważyć.
         let g = Geom::of(&Gray8::new(Rotation::default()));
         let dot_x = g.time_col_w - 18;
-        for (text, size) in [("cały dzień", 20.0_f32), ("08:00", 26.0_f32)] {
-            let w = fonts.measure(text, size, Weight::Regular).ceil() as i32;
+        // Rozmiary i krój muszą być te SAME, co w `draw_event`, inaczej strażnik
+        // pilnuje czegoś, czego na ekranie nie ma. Wcześniej mierzył 20/26 px krojem
+        // Regular, a rysowane było Medium — czyli węższą wersję niż prawdziwa.
+        for (text, size) in [("cały dzień", TEXT_BODY), ("08:00", TEXT_LEAD)] {
+            let w = fonts.measure(text, size, Weight::Medium).ceil() as i32;
             assert!(
                 w + 8 <= dot_x,
                 "`{text}` zajmuje {w} px, a do kropki jest {dot_x} px — zderzą się"
