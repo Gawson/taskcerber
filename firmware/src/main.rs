@@ -1435,7 +1435,7 @@ enum BringUpCard {
 /// `FINISH_FULL_WITH_DU` w `epd`, nie kolejne czyszczenia.
 const EXTRA_FULLCLEARS: u32 = 0;
 
-const BRING_UP_CARD: BringUpCard = BringUpCard::Uniformity;
+const BRING_UP_CARD: BringUpCard = BringUpCard::None;
 
 
 /// Jak długo urządzenie śpi po wyrysowaniu karty.

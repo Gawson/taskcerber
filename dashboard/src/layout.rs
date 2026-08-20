@@ -124,6 +124,22 @@ pub fn render(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     draw_agenda(model, fonts, c, &mut screen);
     draw_footer(model, fonts, c, &mut screen);
 
+    // Agenda jest DWUPOZIOMOWA, tak jak ekran konfiguracji — i to jest zmiana
+    // podyktowana pomiarem, nie estetyką.
+    //
+    // Zmierzone na zrzucie przepuszczonym przez `Gray8::simulate_panel`: **31%
+    // atramentu tego ekranu lądowało w poziomach, których panel prawie nie pokazuje**
+    // — 20,5% ledwo widocznych, 10,7% niewidocznych w ogóle. Prawie w całości był to
+    // antyaliasing krawędzi liter, bo `Fonts::draw` blenduje pokryciem.
+    //
+    // Na zwykłym wyświetlaczu ta obwódka nadaje kresce wagę. Tutaj po prostu znika,
+    // więc litera traci jedną trzecią atramentu i wygląda na cienką i wypłowiałą —
+    // dokładnie tak, jak to zgłoszono ze sprzętu. Po kwantyzacji czytelne jest 100%
+    // atramentu, a jego ilość spada tylko o 2%, bo próg `BILEVEL_THRESHOLD` jest
+    // przesunięty w stronę czerni i większość obwódki zostaje czernią zamiast zniknąć.
+    // W praktyce kreska raczej tyje, niż chudnie.
+    c.quantize2();
+
     screen
 }
 
