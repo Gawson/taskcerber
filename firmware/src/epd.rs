@@ -59,14 +59,14 @@ const PANEL_BUS_MHZ: Option<i32> = None;
 
 /// Czy pełne odświeżenie ma iść przez CZERŃ zamiast przez `epd_fullclear`.
 ///
-/// Pełne uzasadnienie przy [`Epd::flash_to_black`]. W skrócie: `epd_fullclear`
-/// zostawia tło na bieli z surowych pchnięć, a treść dostaje prawdziwy przebieg
-/// GC16 — i te dwie biele różnią się na tyle, że widać prostokąt obejmujący
-/// narysowane elementy. Przejście przez czerń sprawia, że różnicą jest KAŻDY
-/// piksel, więc cały ekran dostaje ten sam przebieg.
+/// Pełne uzasadnienie przy [`Epd::reset_to_uniform_white`]. W skrócie: `epd_fullclear`
+/// zostawia tło na bieli z surowych pchnięć `CLEAR_BYTE`, a treść dostaje prawdziwy
+/// przebieg GC16 — i te dwie biele różnią się na tyle, że na szkle widać jaśniejszy
+/// obrys wszystkiego, co narysowane. Przejście przez czerń, a potem GC16 na biel,
+/// sprawia, że kalibrowany przebieg dostaje KAŻDY piksel.
 ///
-/// Przy okazji jest to 35 przelotów przez bramki zamiast 126 i jedno mignięcie
-/// zamiast pięciu. `false` wraca do starej drogi, gdyby trzeba było porównać.
+/// Przy okazji jest to 35 klatek resetu zamiast 96 i jedno przejście przez czerń
+/// zamiast trzech cykli. `false` wraca do starej drogi, gdyby trzeba było porównać.
 const FULL_VIA_BLACK: bool = true;
 
 /// Do ilu pikseli wyrównujemy obszar częściowego odświeżenia. Patrz
@@ -318,7 +318,7 @@ impl Epd {
 
         if mode == Refresh::Full {
             if FULL_VIA_BLACK {
-                self.flash_to_black(temperature_c);
+                self.reset_to_uniform_white(temperature_c);
             } else {
                 // Stara droga, zostawiona do porównania. SAFETY: epdiy zainicjalizowane,
                 // szyny podniesione. Ścieżka pustej różnicy (front == back == biel)
@@ -350,52 +350,72 @@ impl Epd {
         Ok(())
     }
 
-    /// Zagania cały panel do CZERNI i zostawia `back_fb` czarny.
+    /// Sprowadza cały panel do JEDNEJ, kalibrowanej bieli — przez czerń.
     ///
-    /// # To jest sedno jednorodności tła
+    /// # Dlaczego przez czerń, a nie wprost
     ///
-    /// epdiy rysuje wyłącznie RÓŻNICĘ i wyłącznie na obszarze
-    /// `dirty_lines x dirty_columns`. Przy czystym, białym `back_fb` różnicą jest sama
-    /// treść — więc prawdziwy przebieg GC16 dostaje tylko prostokąt obejmujący to, co
-    /// narysowane, a nie cały ekran. Reszta powierzchni zostaje na tym, co zostawiły
-    /// surowe pchnięcia z `epd_clear()`, i **to jest inna biel**.
+    /// epdiy napędza wyłącznie piksele, w których `front_fb` różni się od `back_fb`,
+    /// i tylko na obszarze `dirty_lines x dirty_columns`. Wypchnięcie bieli na biały
+    /// `back_fb` nie robi więc nic. Trzeba najpierw wprowadzić panel w stan, który
+    /// różni się od bieli WSZĘDZIE — i to jest jedyne zadanie kroku pierwszego.
     ///
-    /// Widać to na sztuce dokładnie tak: jaśniejsze tło pokrywa się z wierszami tekstu
-    /// i sięga w poziomie od najbardziej wysuniętego w lewo elementu do najbardziej
-    /// wysuniętego w prawo — bo `dirty_columns` jest sumą po całym ekranie. Wnętrze
-    /// przycisku wewnątrz tego prostokąta też jest bielsze od marginesu obok.
+    /// # Dlaczego to są DWA kroki, a nie jeden
     ///
-    /// Lekarstwem nie jest wyrównywanie bieli przed rysowaniem — próbowaliśmy, i to
-    /// tylko przesunęło problem. Lekarstwem jest **zmusić GC16, żeby objął wszystko**:
-    /// jeśli przed narysowaniem treści panel i `back_fb` są CZARNE, to każdy piksel
-    /// bez wyjątku jest różnicą, każdy dostaje ten sam przebieg i cała powierzchnia
-    /// kończy na tej samej bieli.
+    /// Pierwsza wersja kończyła na czerni i zostawiała `back_fb` czarny, licząc na to,
+    /// że treść narysuje się „z czerni" i cały ekran dostanie ten sam przebieg. To był
+    /// błąd i widać go było na sztuce: **czarny tekst ma wtedy `from == to`, więc nie
+    /// dostaje żadnego przebiegu** i zostaje na płytkiej czerni z pięciofazowego DU
+    /// zamiast na kalibrowanej czerni GC16. Litery wychodziły cieńsze i mniej czarne,
+    /// a najwięcej traciły antyaliasowane krawędzie.
     ///
-    /// # Przy okazji: trzy razy szybciej i jedno mignięcie zamiast pięciu
+    /// Czerń jest więc krokiem POŚREDNIM. Po niej idzie pełny GC16 na biel: każdy
+    /// piksel jest wtedy różnicą, każdy dostaje kalibrowany przebieg i cała
+    /// powierzchnia kończy na tej samej bieli. Dopiero na to pada treść — znowu przez
+    /// GC16, tym razem z bieli, więc litery dostają pełną czerń, a tło zostaje
+    /// nietknięte i jednorodne.
     ///
-    /// To zastępuje całe `epd_fullclear`, czyli 30 klatek GC16 na biel plus 66 surowych
-    /// pchnięć `epd_clear()` (trzy cykle po dziesięć klatek czerni i dwanaście bieli —
-    /// stąd te trzy mignięcia). Zamiast 126 przelotów przez bramki robimy 35:
-    /// pięć klatek DU na czerń i trzydzieści GC16 na treść. ~250 ms zamiast ~890 ms
-    /// i jedno przejście przez czerń, czyli dokładnie tyle, ile pokazuje każdy czytnik.
+    /// # Co to zastępuje
     ///
-    /// Usuwanie duchów zostaje: przejście przez pełną czerń i dopiero stamtąd GC16 do
-    /// wartości docelowej to klasyczna sekwencja odświeżająca, nie skrót.
+    /// Całe `epd_fullclear`, czyli 30 klatek GC16 na biel plus 66 surowych pchnięć
+    /// `epd_clear()`. Te pchnięcia to `CLEAR_BYTE`/`DARK_BYTE` — surowe wzory napędu
+    /// po dwa bity na piksel, bez waveformu i bez kompensacji temperaturowej. Zostawiają
+    /// inną biel niż GC16, a że napęd GC16 dostawał tylko prostokąt obejmujący treść,
+    /// granica między tymi dwiema bielami rysowała się na szkle jako jaśniejszy obrys
+    /// wszystkiego, co narysowane.
     ///
-    /// Wołane przy podniesionych szynach. Błąd tylko logujemy — kolejny krok i tak
+    /// Bilans: 35 klatek zamiast 96 na sam reset i jedno przejście przez czerń zamiast
+    /// trzech cykli czerń-biel z `epd_clear()`.
+    ///
+    /// Wołane przy podniesionych szynach. Błędy tylko logujemy — następny krok i tak
     /// narysuje treść, najwyżej na gorszym tle.
-    fn flash_to_black(&mut self, temperature_c: i32) {
+    fn reset_to_uniform_white(&mut self, temperature_c: i32) {
         let started = std::time::Instant::now();
+
+        // Krok 1: czerń przez DU. Tanio (5 faz) i wystarczy, bo o jakość TEJ czerni
+        // nikt nie pyta — ma tylko różnić się od bieli na każdym pikselu.
         self.framebuffer().fill(0x00);
         // SAFETY: epdiy zainicjalizowane, szyny podniesione, bufor jego własny.
-        let r = unsafe {
+        let dark = unsafe {
             sys::epd_hl_update_screen(&mut self.hl, sys::EpdDrawMode_MODE_DU, temperature_c)
         };
-        if r != sys::EpdDrawError_EPD_DRAW_SUCCESS {
-            log::warn!("zaczernienie przed pełnym odświeżeniem zwróciło błąd {r}");
+        if dark != sys::EpdDrawError_EPD_DRAW_SUCCESS {
+            log::warn!("reset panelu: zaczernienie zwróciło błąd {dark}");
             return;
         }
-        log::info!("zaczernienie: {} ms", started.elapsed().as_millis());
+
+        // Krok 2: biel przez GC16. Teraz KAŻDY piksel jest różnicą, więc każdy dostaje
+        // kalibrowany przebieg i kończy na tej samej bieli.
+        self.framebuffer().fill(0xFF);
+        // SAFETY: jw.
+        let light = unsafe {
+            sys::epd_hl_update_screen(&mut self.hl, sys::EpdDrawMode_MODE_GC16, temperature_c)
+        };
+        if light != sys::EpdDrawError_EPD_DRAW_SUCCESS {
+            log::warn!("reset panelu: rozjaśnienie zwróciło błąd {light}");
+            return;
+        }
+
+        log::info!("reset panelu: {} ms", started.elapsed().as_millis());
     }
 
     /// Odświeża wskazany prostokąt panelu, w trybie DU.
