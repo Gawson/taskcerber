@@ -36,8 +36,12 @@ ale LoRa/GPS muszą być wykrywane runtime'owo (probe‑and‑degrade).
 | Bateria | Li‑Po 3.7 V 1500 mAh |
 | Reset | pin `EN` (nie GPIO); BOOT = GPIO0 |
 
-**Wejście w tryb download (procedura vendora):** przytrzymaj BOOT → kliknij RST z tyłu →
-puść RST → puść BOOT.
+**Wejście w tryb download.** Vendor podaje procedurę „przytrzymaj BOOT → kliknij RST
+z tyłu → puść RST → puść BOOT" i przepisuje ją z README płytek z zewnętrznym mostkiem
+USB-UART. **Na tej płytce nie jest potrzebna** i zostało to sprawdzone na sztuce:
+ESP32-S3 ma natywne USB-Serial-JTAG, więc host sam wymusza reset w tryb download —
+wystarczy wpiąć kabel i wgrywać. Procedura ręczna zostaje jako ratunek, gdyby
+firmware zawiesił kontroler USB.
 
 **Ważne dla builda:** PSRAM jest **octal**, a domyślna konfiguracja esp‑hal to `quad`.
 Bez `ESP_HAL_CONFIG_PSRAM_MODE = "octal"` inicjalizacja PSRAM zwróci zły rozmiar albo padnie.

@@ -68,6 +68,14 @@ pub struct Screen {
     pub pages: usize,
     /// Która strona jest pokazana (liczona od zera).
     pub page: usize,
+    /// Prostokąt pola, w którym widać wpisywaną wartość — tylko na ekranie
+    /// konfiguracji.
+    ///
+    /// Jest tu, bo to **jedyny** fragment ekranu, który zmienia się przy wpisaniu
+    /// znaku. Dzięki temu firmware odświeża po naciśnięciu klawisza dwa małe
+    /// prostokąty zamiast całej klatki, a znak pojawia się od razu, zamiast czekać
+    /// na pełne przemalowanie ekranu.
+    pub edit_box: Option<Rect>,
 }
 
 impl Screen {
@@ -76,11 +84,15 @@ impl Screen {
     /// Regiony są sprawdzane w kolejności dodania, więc dodane później
     /// (rysowane na wierzchu) mają pierwszeństwo — dlatego iterujemy od tyłu.
     pub fn hit(&self, x: i32, y: i32) -> Option<Action> {
-        self.hits
-            .iter()
-            .rev()
-            .find(|h| h.contains(x, y))
-            .map(|h| h.action)
+        self.hit_region(x, y).map(|h| h.action)
+    }
+
+    /// To samo, ale zwraca cały region — z prostokątem.
+    ///
+    /// Prostokąt jest potrzebny firmware'owi do natychmiastowego feedbacku: po
+    /// trafieniu odrysowuje się sam ten obszar, zanim wykona się akcja pod spodem.
+    pub fn hit_region(&self, x: i32, y: i32) -> Option<&HitRegion> {
+        self.hits.iter().rev().find(|h| h.contains(x, y))
     }
 }
 
@@ -107,6 +119,7 @@ mod tests {
             ],
             pages: 1,
             page: 0,
+            edit_box: None,
         };
         assert_eq!(screen.hit(120, 120), Some(Action::RefreshNow));
         assert_eq!(screen.hit(10, 10), Some(Action::Back));

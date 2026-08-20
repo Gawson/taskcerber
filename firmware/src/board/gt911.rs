@@ -11,8 +11,11 @@
 //! pod `0x5D` bez przeprowadzenia tej sekwencji, dostaniesz albo ciszę, albo
 //! układ, który jeszcze nie wstał.
 //!
-//! Sekwencję trzeba powtarzać **przy każdym wybudzeniu**. Deep sleep sprowadza
-//! `T_RST` (GPIO9) do stanu domyślnego, czyli trzyma kontroler w resecie.
+//! Sekwencję trzeba powtarzać **przy każdym wybudzeniu**: sekwencja wyłączania
+//! zatrzaskuje `T_RST` (GPIO9) w dole, żeby kontroler nie pobierał prądu przez sen.
+//! Zatrzask trzeba najpierw zdjąć — robi to `power::shutdown::release_pin_holds`
+//! na starcie i jeszcze raz [`reset_sequence`], bo ani `gpio_reset_pin`, ani
+//! `gpio_set_level` same go nie ruszają.
 //!
 //! # Rejestry są 16-bitowe
 //!
@@ -58,29 +61,53 @@ pub const INT: i32 = 3;
 const REG_PRODUCT_ID: u16 = 0x8140;
 /// Stan bufora: bit 7 = są nowe dane, bity 0-3 = liczba punktów.
 const REG_STATUS: u16 = 0x814E;
-/// Pierwszy punkt dotyku, 8 bajtów.
-const REG_POINT1: u16 = 0x8150;
+/// Pierwszy punkt dotyku, 8 bajtów: `[track ID, x lo, x hi, y lo, y hi, size lo,
+/// size hi, rezerwa]`.
+///
+/// **To jest `0x814F`, nie `0x8150`.** Bloki punktów zaczynają się bezpośrednio
+/// za rejestrem stanu i kolejne leżą co 8 bajtów (`0x8157`, `0x815F`, ...). Zgodnie
+/// mówią o tym: `GT911Constants.h` z SensorLib vendora (`GT911_POINT_1 (0X814F)`),
+/// `TouchDrvGT911::getPoint`, który czyta 39 bajtów od `{0x81, 0x4F}`, oraz crate
+/// `lilygo-t5s3paperpro` (`ed047tc1.rs:65`).
+///
+/// Przesunięcie o jeden bajt nie daje ciszy ani błędu — daje **liczby**. Dotknięcie
+/// (100, 200) czyta się wtedy jako (51200, ~15000): każde trafienie wypada poza
+/// każdy obszar `Screen::hit`, więc dotyk wygląda na całkowicie martwy, mimo że
+/// kontroler odpowiada i zgłasza palec.
+const REG_POINT1: u16 = 0x814F;
+
+/// Rozdzielczość skonfigurowana w kontrolerze: X pod `0x8146`, Y pod `0x8148`,
+/// oba little-endian. Rejestry informacyjne, tylko do odczytu.
+const REG_X_RESOLUTION: u16 = 0x8146;
+const REG_Y_RESOLUTION: u16 = 0x8148;
 
 const STATUS_READY: u8 = 0x80;
 const STATUS_COUNT: u8 = 0x0F;
 
 // ---------------------------------------------------------------------------
-// Osie kontrolera względem panelu — ZAŁOŻENIE, NIE POMIAR
+// Osie kontrolera względem panelu — BIERZEMY Z KONTROLERA, NIE ZGADUJEMY
 // ---------------------------------------------------------------------------
-// Zakładamy, że GT911 raportuje w tym samym układzie, w którym panel skanuje:
-// `x` wzdłuż 960 pikseli, `y` wzdłuż 540. Oba układy są przylepione do tego samego
-// szkła, więc jest to najbardziej prawdopodobne — ale nie zostało sprawdzone.
+// GT911 sam mówi, w jakim układzie liczy: rejestry `0x8146`/`0x8148` niosą
+// rozdzielczość wpisaną w jego konfigurację. Na tej płytce spotykane są obie
+// wartości i to jest jedyna rzecz, która rozstrzyga obrót:
 //
-// Poprawka po pierwszym uruchomieniu sprowadza się do przestawienia tych trzech
-// stałych i nie wymaga ruszania niczego poza tym plikiem. `interactive_loop` wypisuje
-// przy każdym dotknięciu surowe współrzędne panelu obok przeliczonych na płótno,
-// więc dotknięcie czterech rogów wystarczy, żeby je ustawić:
+//   960 x 540  -> kontroler liczy tak jak skanuje panel, nic nie przeliczamy
+//   540 x 960  -> kontroler jest zamontowany o 90° i trzeba obrócić
 //
-//   lewy górny róg zwraca ~(0, 0)          -> wszystko false, tak jak teraz
-//   lewy górny róg zwraca ~(0, 540)        -> FLIP_Y
-//   lewy górny róg zwraca ~(960, 0)        -> FLIP_X
-//   x rośnie przy ruchu w dół ekranu       -> SWAP_XY
-const SWAP_XY: bool = false;
+// Nie jest to nasz wynalazek. Crate `lilygo-t5s3paperpro` dla dokładnie tej płytki
+// ma na to osobną gałąź włączaną tym samym warunkiem (`src/ed047tc1.rs`, funkcja
+// czytająca punkty): przy `(540, 960)` liczy `x = raw_y`, `y = 540 - 1 - raw_x`,
+// a poza tym skaluje surowe wartości do wymiarów panelu. Robimy to samo, bo dzięki
+// temu **ta sama binarka działa na obu wariantach** i nie ma czego zgadywać.
+//
+// Lustra z rozdzielczości nie wynikają — sam obrót nie mówi, czy szkło jest
+// przyklejone tą, czy drugą stroną. Te dwie stałe zostają na wypadek, gdyby
+// dotknięcie rogu pokazało odbicie; `interactive_loop` wypisuje przy każdym
+// dotknięciu surowe współrzędne panelu obok przeliczonych na płótno:
+//
+//   lewy górny róg zwraca ~(0, 0)     -> nic nie zmieniaj
+//   lewy górny róg zwraca ~(0, 540)   -> FLIP_Y
+//   lewy górny róg zwraca ~(960, 0)   -> FLIP_X
 const FLIP_X: bool = false;
 const FLIP_Y: bool = false;
 
@@ -112,7 +139,17 @@ pub struct TouchPoint {
 
 pub struct Gt911 {
     dev: I2cDevice,
+    /// Rozdzielczość z konfiguracji kontrolera; `(0, 0)`, gdy odczyt się nie udał.
+    /// Decyduje o obrocie w [`Gt911::orient`].
+    resolution: (u16, u16),
 }
+
+// Kontroler jest oddawany na własność wątkowi czytającemu dotyk. Magistralę I²C
+// dzieli wtedy z epdiy, które chodzi z wątku głównego — i to jest bezpieczne, bo
+// sterownik `i2c_master` z ESP-IDF serializuje transakcje semaforem `bus_lock_mux`
+// (`components/esp_driver_i2c/i2c_master.c`), niezależnie od tego, z ilu zadań
+// przychodzą.
+unsafe impl Send for Gt911 {}
 
 impl Gt911 {
     /// Przeprowadza sekwencję resetu i dołącza urządzenie do magistrali.
@@ -128,7 +165,10 @@ impl Gt911 {
             let Ok(dev) = bus.device(address) else {
                 continue;
             };
-            let touch = Self { dev };
+            let mut touch = Self {
+                dev,
+                resolution: (0, 0),
+            };
             let Ok(id) = touch.product_id() else {
                 continue;
             };
@@ -138,6 +178,14 @@ impl Gt911 {
                     String::from_utf8_lossy(&id)
                 );
                 continue;
+            }
+
+            // Rozdzielczość rozstrzyga obrót osi, więc czytamy ją raz, tutaj.
+            // Nieudany odczyt zostawia `(0, 0)`, czyli przeliczanie tożsamościowe —
+            // to samo, co robił firmware przed tą zmianą.
+            match touch.read_resolution() {
+                Ok(res) => touch.resolution = res,
+                Err(e) => warn!("GT911: nie mogę odczytać rozdzielczości: {e:#}"),
             }
 
             if address == ADDRESS_ALT {
@@ -160,19 +208,36 @@ impl Gt911 {
         Ok(buf)
     }
 
+    /// Rozdzielczość odczytana przy otwarciu kontrolera. `(0, 0)` = nieznana.
+    pub fn resolution(&self) -> (u16, u16) {
+        self.resolution
+    }
+
+    /// Czy kontroler jest zamontowany obrócony o 90° względem skanu panelu.
+    pub fn rotated(&self) -> bool {
+        let (x, y) = self.resolution;
+        x > 0 && y > 0 && x < y
+    }
+
+    fn read_resolution(&self) -> Result<(u16, u16)> {
+        let mut buf = [0u8; 2];
+        self.read_at(REG_X_RESOLUTION, &mut buf)?;
+        let x = u16::from_le_bytes(buf);
+        self.read_at(REG_Y_RESOLUTION, &mut buf)?;
+        Ok((x, u16::from_le_bytes(buf)))
+    }
+
     /// Odczytuje stan dotyku.
     ///
     /// [`Report::Idle`] jest stanem normalnym i wołający odpytuje w pętli.
     ///
-    /// # Orientacja osi jest ZAŁOŻENIEM
+    /// # Orientacja osi
     ///
-    /// Zakładamy, że GT911 raportuje w tym samym układzie, w którym panel skanuje:
-    /// `x` wzdłuż 960 pikseli, `y` wzdłuż 540. Jest to najczęstsze ustawienie i zgadza
-    /// się z tym, że oba układy są przylepione do tego samego szkła — ale nie zostało
-    /// sprawdzone na sztuce. Jeśli po pierwszym uruchomieniu dotyk trafia w lustrzane
-    /// odbicie albo w zamienione osie, poprawka jest jednoliniowa i **należy do tego
-    /// miejsca**, nie do układu graficznego: przelicznik na płótno jest już wspólny
-    /// dla dotyku i dla pakowania.
+    /// Zwracany punkt jest już w układzie **panelu** (960×540), niezależnie od tego,
+    /// jak liczy sam kontroler — obrót bierze się z jego rozdzielczości, patrz
+    /// [`Gt911::orient`]. Przeliczenie panel → płótno robi dopiero
+    /// `Rotation::panel_to_canvas`, tą samą macierzą, którą pakowanie stosuje
+    /// w drugą stronę.
     pub fn read(&self) -> Result<Report> {
         let mut status = [0u8; 1];
         self.read_at(REG_STATUS, &mut status)?;
@@ -188,7 +253,7 @@ impl Gt911 {
             let mut raw = [0u8; 8];
             self.read_at(REG_POINT1, &mut raw)?;
             // Bajt 0 to identyfikator śledzenia, współrzędne zaczynają się od 1.
-            Report::Down(orient(
+            Report::Down(self.orient(
                 u16::from_le_bytes([raw[1], raw[2]]) as i32,
                 u16::from_le_bytes([raw[3], raw[4]]) as i32,
             ))
@@ -224,6 +289,12 @@ fn reset_sequence() {
     // 39/40, więc GPIO3 i GPIO9 nie kolidują z niczym.
     unsafe {
         for pin in [RST, INT] {
+            // Zatrzask z `power::shutdown::set_low_and_hold` przeżywa deep sleep,
+            // a `gpio_reset_pin` go NIE zdejmuje — bez tego pad zostaje przybity
+            // do zera i kontroler nigdy nie wychodzi z resetu. Główne zdjęcie
+            // zatrzasków robi `release_pin_holds` na starcie; tutaj jest drugi raz,
+            // bo to ten kod jest właścicielem obu pinów.
+            sys::gpio_hold_dis(pin);
             sys::gpio_reset_pin(pin);
             sys::gpio_set_direction(pin, sys::gpio_mode_t_GPIO_MODE_OUTPUT);
         }
@@ -243,16 +314,42 @@ fn reset_sequence() {
     }
 }
 
-/// Sprowadza współrzędne kontrolera do układu panelu — patrz `SWAP_XY` i spółka.
-fn orient(x: i32, y: i32) -> TouchPoint {
-    let (mut x, mut y) = if SWAP_XY { (y, x) } else { (x, y) };
-    if FLIP_X {
-        x = dashboard::PANEL_WIDTH as i32 - 1 - x;
+impl Gt911 {
+    /// Sprowadza surowe współrzędne kontrolera do układu panelu (960×540).
+    ///
+    /// Obrót wynika z rozdzielczości kontrolera, lustra ze stałych `FLIP_*` —
+    /// pełne wyjaśnienie przy tych stałych.
+    fn orient(&self, raw_x: i32, raw_y: i32) -> TouchPoint {
+        const W: i32 = dashboard::PANEL_WIDTH as i32;
+        const H: i32 = dashboard::PANEL_HEIGHT as i32;
+        let (rx, ry) = (self.resolution.0 as i32, self.resolution.1 as i32);
+
+        let (mut x, mut y) = if rx < 2 || ry < 2 {
+            // Rozdzielczości nie znamy — bierzemy surowe wartości, tak jak wcześniej.
+            (raw_x, raw_y)
+        } else if rx < ry {
+            // Kontroler zamontowany o 90°: jego `y` biegnie wzdłuż długiego boku.
+            (scale(raw_y, ry, W), scale(rx - 1 - raw_x, rx, H))
+        } else {
+            (scale(raw_x, rx, W), scale(raw_y, ry, H))
+        };
+
+        if FLIP_X {
+            x = W - 1 - x;
+        }
+        if FLIP_Y {
+            y = H - 1 - y;
+        }
+        TouchPoint { x, y }
     }
-    if FLIP_Y {
-        y = dashboard::PANEL_HEIGHT as i32 - 1 - y;
-    }
-    TouchPoint { x, y }
+}
+
+/// Przelicza wartość z zakresu `[0, from)` na `[0, to)`.
+///
+/// Rozdzielczość kontrolera zwykle jest równa wymiarowi panelu i wtedy to jest
+/// tożsamość, ale nie ma na to gwarancji — crate vendora skaluje i my też.
+fn scale(v: i32, from: i32, to: i32) -> i32 {
+    v.clamp(0, from - 1) * (to - 1) / (from - 1)
 }
 
 fn delay_ms(ms: u32) {
@@ -275,6 +372,17 @@ pub fn open(bus: &I2cBus, verbose: bool) -> Option<Gt911> {
                     ),
                     Err(e) => warn!("GT911 odpowiedział, ale identyfikator nie: {e:#}"),
                 }
+                let (rx, ry) = touch.resolution();
+                info!(
+                    "GT911: rozdzielczość {rx}x{ry} -> {}",
+                    if rx == 0 || ry == 0 {
+                        "NIEZNANA, przeliczam tożsamościowo"
+                    } else if touch.rotated() {
+                        "kontroler obrócony o 90°, przeliczam"
+                    } else {
+                        "osie jak panel, bez przeliczania"
+                    }
+                );
             }
             Some(touch)
         }

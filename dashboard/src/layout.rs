@@ -12,7 +12,7 @@
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::canvas::{Gray8, Rect, BLACK, GRAY_40, GRAY_50, GRAY_60, GRAY_80, WHITE};
+use crate::canvas::{Gray8, Rect, BLACK, GRAY_20, GRAY_40, GRAY_50, GRAY_60, GRAY_80, WHITE};
 use crate::hit::{Action, HitRegion, Screen};
 use crate::model::{
     data_dzien_miesiac, dzien_skrot, godzina, naglowek_dnia, za_ile, Battery, CalEvent, Model,
@@ -78,14 +78,30 @@ impl Geom {
 }
 
 /// Wysokość paska statusu w nagłówku i jego odsunięcie od krawędzi.
-const STATUS_SIZE: f32 = 22.0;
+// ---------------------------------------------------------------------------
+// Typografia na e-papierze: dolna granica jest twarda
+// ---------------------------------------------------------------------------
+// Panel ma 4.7" i 960×540, czyli ~234 DPI — ale to nie jest gęstość LCD, tylko
+// elektroforetyczna zawiesina z waveformem o 16 poziomach, z których ciemne są
+// słabo rozróżnialne. Cienki krój w małym rozmiarze nie wychodzi „drobny", tylko
+// **poszczerbiony**: część kresek nie dostaje pełnego przebiegu i znika.
+//
+// Stąd dwie reguły, sprawdzone na sztuce:
+//
+//   1. Nic poniżej 19 px. Cokolwiek mniejszego jest do odczytania wyłącznie z nosem
+//      przy szkle i wygląda na uszkodzone.
+//   2. Poniżej ~26 px krój ma być `Medium` albo `Bold`, nigdy `Regular` — grubsza
+//      kreska nadrabia to, czego panel nie utrzymuje.
+//   3. Tekst jest czarny albo `GRAY_20`. Jaśniejsze szarości zostają dla linii
+//      i wypełnień; na literach dają dokładnie ten efekt poszczerbienia.
+const STATUS_SIZE: f32 = 25.0;
 const STATUS_PAD: i32 = 10;
 const STATUS_PILL_TOP: i32 = 66;
 const STATUS_BASELINE: f32 = 90.0;
 
 /// Rozmiar wartości na kafelku i podłoga, poniżej której wolimy uciąć niż zmniejszać.
 const TILE_VALUE_SIZE: f32 = 32.0;
-const TILE_VALUE_MIN_SIZE: f32 = 17.0;
+const TILE_VALUE_MIN_SIZE: f32 = 22.0;
 
 const DAY_HEADER_H: i32 = 40;
 const EVENT_H: i32 = 50;
@@ -249,8 +265,8 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         crate::model::dzien_tygodnia(today),
         x,
         50.0,
-        30.0,
-        Weight::Medium,
+        32.0,
+        Weight::Bold,
         BLACK,
         Align::Left,
     );
@@ -264,8 +280,8 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         x,
         82.0,
         26.0,
-        Weight::Regular,
-        GRAY_40,
+        Weight::Medium,
+        GRAY_20,
         Align::Left,
     );
 
@@ -283,7 +299,7 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         &status_text,
         (g.w - 2 * g.margin) as f32 * 0.56,
         STATUS_SIZE,
-        Weight::Regular,
+        Weight::Medium,
     );
     let status_w = fonts.draw(
         c,
@@ -291,7 +307,7 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         (g.w - g.margin - STATUS_PAD) as f32,
         STATUS_BASELINE,
         STATUS_SIZE,
-        Weight::Regular,
+        Weight::Medium,
         status_ink,
         Align::Right,
     );
@@ -378,7 +394,13 @@ fn draw_agenda(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
 
     let rows = build_rows(model);
     if rows.is_empty() {
-        draw_empty_state(fonts, c);
+        // Na urządzeniu bez konfiguracji pusty kalendarz nie jest informacją —
+        // informacją jest to, że nie ma czego pokazać, dopóki ktoś nie wpisze sieci.
+        if matches!(model.net, NetState::NeedsAuth) {
+            draw_setup_cta(fonts, c, screen);
+        } else {
+            draw_empty_state(fonts, c);
+        }
         screen.pages = 1;
         screen.page = 0;
         return;
@@ -521,9 +543,9 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
             &godzina(event.end),
             g.margin as f32,
             baseline + 20.0,
-            18.0,
-            Weight::Regular,
-            GRAY_60,
+            20.0,
+            Weight::Medium,
+            GRAY_20,
             Align::Left,
         );
     }
@@ -578,15 +600,15 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
     );
 
     if let Some(loc) = &event.location {
-        let loc = fonts.truncate(loc, avail as f32, 20.0, Weight::Regular);
+        let loc = fonts.truncate(loc, avail as f32, 21.0, Weight::Medium);
         fonts.draw(
             c,
             &loc,
             text_x as f32,
             baseline + 22.0,
-            20.0,
-            Weight::Regular,
-            GRAY_50,
+            21.0,
+            Weight::Medium,
+            GRAY_20,
             Align::Left,
         );
     }
@@ -602,6 +624,55 @@ fn is_first_upcoming(model: &Model, event: &CalEvent) -> bool {
         .unwrap_or(false)
 }
 
+/// Szerokość i wysokość przycisku wejścia w konfigurację.
+///
+/// 96 px to na tym panelu ponad 10 mm — cel dla palca, nie dla kursora.
+const SETUP_BUTTON_W: i32 = 420;
+const SETUP_BUTTON_H: i32 = 96;
+
+/// Przycisk „Skonfiguruj" na urządzeniu, które nie ma jeszcze konfiguracji.
+///
+/// Kafelek w stopce mówi „krok 1 — dotknij ekranu", więc na ekranie musi być coś,
+/// co wygląda jak przycisk i nim jest. Wcześniej jedynymi wejściami w konfigurację
+/// były dwie plakietki po 44 px przy samych krawędziach — razem **3% powierzchni** —
+/// więc człowiek, który przeczytał instrukcję i stuknął w środek ekranu, wyciągał
+/// wniosek, że dotyk jest zepsuty. Napis na ekranie ma być prawdą.
+fn draw_setup_cta(fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
+    let g = Geom::of(c);
+    let w = SETUP_BUTTON_W.min(g.w - 2 * g.margin);
+    let h = SETUP_BUTTON_H;
+    let rect = Rect::new(
+        (g.w - w) / 2,
+        (g.content_top + g.content_bottom) / 2 - h / 2,
+        w,
+        h,
+    );
+
+    stroke_round_rect(c, rect, 14.0, 3, BLACK);
+    fonts.draw(
+        c,
+        "Skonfiguruj",
+        (rect.x + rect.w / 2) as f32,
+        (rect.y + rect.h / 2 + 12) as f32,
+        34.0,
+        Weight::Bold,
+        BLACK,
+        Align::Center,
+    );
+    fonts.draw(
+        c,
+        "sieć i adres kalendarza",
+        (rect.x + rect.w / 2) as f32,
+        (rect.bottom() + 40) as f32,
+        24.0,
+        Weight::Medium,
+        GRAY_20,
+        Align::Center,
+    );
+
+    screen.hits.push(HitRegion::new(rect, Action::OpenSetup));
+}
+
 fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
     let g = Geom::of(c);
     let cx = g.w as f32 / 2.0;
@@ -612,18 +683,18 @@ fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
         cx,
         cy,
         42.0,
-        Weight::Medium,
-        GRAY_40,
+        Weight::Bold,
+        GRAY_20,
         Align::Center,
     );
     fonts.draw(
         c,
         "Wolne do końca widocznego okresu",
         cx,
-        cy + 34.0,
-        22.0,
-        Weight::Regular,
-        GRAY_60,
+        cy + 36.0,
+        24.0,
+        Weight::Medium,
+        GRAY_20,
         Align::Center,
     );
 }
@@ -726,8 +797,8 @@ fn draw_event_detail(
             x,
             y as f32,
             24.0,
-            Weight::Regular,
-            GRAY_50,
+            Weight::Medium,
+            GRAY_20,
             Align::Left,
         );
     }
@@ -790,9 +861,9 @@ fn draw_footer(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
             &model.firmware,
             g.margin as f32,
             (g.h - 8) as f32,
-            15.0,
-            Weight::Regular,
-            GRAY_80,
+            19.0,
+            Weight::Medium,
+            GRAY_20,
             Align::Left,
         );
 
@@ -870,9 +941,9 @@ fn draw_pager(model: &Model, screen: &mut Screen, fonts: &Fonts, c: &mut Gray8, 
         &label,
         g.w as f32 / 2.0,
         (top + g.footer_h - 14) as f32,
-        17.0,
-        Weight::Regular,
-        GRAY_50,
+        20.0,
+        Weight::Medium,
+        GRAY_40,
         Align::Center,
     );
 
@@ -889,15 +960,15 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
     for (i, tile) in model.tiles.iter().take(n).enumerate() {
         let x = g.margin + i as i32 * (tw + gap);
 
-        let label = fonts.truncate(&tile.label.to_uppercase(), tw as f32, 17.0, Weight::Medium);
+        let label = fonts.truncate(&tile.label.to_uppercase(), tw as f32, 20.0, Weight::Medium);
         fonts.draw(
             c,
             &label,
             x as f32,
             (top + 30) as f32,
-            17.0,
+            20.0,
             Weight::Medium,
-            GRAY_50,
+            GRAY_20,
             Align::Left,
         );
 
@@ -1007,8 +1078,11 @@ impl SetupGeom {
         let tab_h = if compact { 44 } else { 56 };
         let label_base = (tabs_y + tab_h) as f32 + if compact { 26.0 } else { 36.0 };
         let box_y = label_base as i32 + if compact { 10 } else { 14 };
-        let box_h = if compact { 54 } else { 70 };
-        let hint_base = (box_y + box_h) as f32 + if compact { 22.0 } else { 30.0 };
+        // Pole wartości jest tym, co się czyta w trakcie wpisywania, i jako jedyne
+        // musi być czytelne z odległości ręki trzymającej urządzenie. Reszta ekranu
+        // może być drobna, to nie.
+        let box_h = if compact { 64 } else { 86 };
+        let hint_base = (box_y + box_h) as f32 + if compact { 24.0 } else { 32.0 };
 
         // Dolna granica listy pól NIE zależy od tego, która strona klawiatury jest
         // pokazana. Gdyby zależała, przełączenie na symbole — o wiersz wyższe —
@@ -1057,6 +1131,24 @@ impl SetupGeom {
 ///
 /// To jedyna droga wprowadzania danych do urządzenia — patrz [`crate::setup`].
 pub fn render_setup(setup: &Setup, fonts: &Fonts, c: &mut Gray8) -> Screen {
+    render_setup_pressed(setup, fonts, c, None)
+}
+
+/// To samo, ale z jednym klawiszem narysowanym **w negatywie**.
+///
+/// Wciśnięty klawisz nie jest zasłaniany czarnym prostokątem, tylko rysowany tym
+/// samym stylem, co `⇧` w blokadzie: wypełnienie czarne, napis biały. Znak zostaje
+/// widoczny pod palcem, a to jest cała różnica między „coś mignęło" a „widzę, który
+/// klawisz nacisnąłem".
+///
+/// Klawisz, który i tak jest wypełniony (gotowy „zapisz", `⇧` w blokadzie), dostaje
+/// zamiast tego grubą ramkę — inaczej naciśnięcie nie zmieniałoby niczego.
+pub fn render_setup_pressed(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    pressed: Option<Rect>,
+) -> Screen {
     c.clear(WHITE);
 
     let mut screen = Screen::default();
@@ -1064,9 +1156,20 @@ pub fn render_setup(setup: &Setup, fonts: &Fonts, c: &mut Gray8) -> Screen {
 
     draw_setup_head(setup, fonts, c, &mut screen, &g);
     draw_setup_summary(setup, fonts, c, &mut screen, &g);
-    draw_keyboard(setup, fonts, c, &mut screen, &g);
+    draw_keyboard(setup, fonts, c, &mut screen, &g, pressed);
 
     screen
+}
+
+/// Styl klawisza po uwzględnieniu tego, czy akurat jest pod palcem.
+fn pressed_style(base: KeyStyle, rect: Rect, pressed: Option<Rect>) -> KeyStyle {
+    if pressed != Some(rect) {
+        return base;
+    }
+    match base {
+        KeyStyle::Filled => KeyStyle::Marked,
+        _ => KeyStyle::Filled,
+    }
 }
 
 fn draw_setup_head(
@@ -1091,10 +1194,10 @@ fn draw_setup_head(
 
     // Po prawej stronie tytułu: czego jeszcze brakuje. To jedyne miejsce, w którym
     // widać postęp — zakładek jest sześć i cztery z nich są opcjonalne.
-    let status_size = if g.compact { 17.0 } else { 19.0 };
+    let status_size = if g.compact { 18.0 } else { 20.0 };
     let (status, ink) = match setup.first_missing() {
         Some(field) => (format!("brakuje: {}", field.tab()), BLACK),
-        None => ("komplet — naciśnij zapisz".to_string(), GRAY_40),
+        None => ("komplet — naciśnij zapisz".to_string(), GRAY_20),
     };
     fonts.draw(
         c,
@@ -1113,7 +1216,7 @@ fn draw_setup_head(
     let count = Field::ALL.len() as i32;
     let tab_gap = 8;
     let tab_w = (g.w - 2 * m - (count - 1) * tab_gap) / count;
-    let tab_size = if g.compact { 17.0 } else { 19.0 };
+    let tab_size = if g.compact { 19.0 } else { 22.0 };
 
     for (i, field) in Field::ALL.into_iter().enumerate() {
         let r = Rect::new(m + i as i32 * (tab_w + tab_gap), g.tabs_y, tab_w, g.tab_h);
@@ -1122,7 +1225,7 @@ fn draw_setup_head(
         if active {
             fill_round_rect(c, r, 10.0, BLACK);
         } else {
-            stroke_round_rect(c, r, 10.0, 2, GRAY_40);
+            stroke_round_rect(c, r, 10.0, 2, BLACK);
         }
 
         // Kropka przy polach wymaganych, które są jeszcze puste. Bez niej nie widać,
@@ -1148,22 +1251,40 @@ fn draw_setup_head(
         screen.hits.push(HitRegion::new(r, Action::Focus(field)));
     }
 
-    // --- edytowane pole ----------------------------------------------------
+    draw_edit_field(setup, fonts, c, screen, g);
+}
+
+/// Rysuje etykietę pola, ramkę z wpisywaną wartością, kursor i podpowiedź.
+///
+/// Wydzielone z [`draw_setup_head`], bo to **jedyny** fragment ekranu konfiguracji,
+/// który zmienia się przy wpisaniu znaku. Firmware przerysowuje sam ten kawałek
+/// w istniejącym płótnie zamiast całej klatki — patrz [`redraw_setup_value`].
+fn draw_edit_field(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    screen: &mut Screen,
+    g: &SetupGeom,
+) {
+    let m = g.content_margin;
     fonts.draw(
         c,
         setup.field().label(),
         m as f32,
         g.label_base,
-        if g.compact { 18.0 } else { 20.0 },
-        Weight::Regular,
-        GRAY_40,
+        if g.compact { 20.0 } else { 24.0 },
+        Weight::Medium,
+        GRAY_20,
         Align::Left,
     );
 
     let boxr = Rect::new(m, g.box_y, g.w - 2 * m, g.box_h);
     stroke_round_rect(c, boxr, 8.0, 2, BLACK);
+    // Z zapasem na kursor i grubość ramki — obszar idzie prosto do częściowego
+    // odświeżenia, a urwana krawędź ramki wyglądałaby jak artefakt.
+    screen.edit_box = Some(Rect::new(boxr.x - 4, boxr.y - 4, boxr.w + 8, boxr.h + 8));
 
-    let size = if g.compact { 24.0 } else { 28.0 };
+    let size = if g.compact { 30.0 } else { 38.0 };
     let pad = 14;
     // 10 px zapasu na kursor, żeby nie wylazł za ramkę przy pełnym polu.
     let avail = (boxr.w - 2 * pad - 10) as f32;
@@ -1192,7 +1313,7 @@ fn draw_setup_head(
         BLACK,
     );
 
-    let hint_size = if g.compact { 16.0 } else { 18.0 };
+    let hint_size = if g.compact { 18.0 } else { 21.0 };
     let hint = fonts.truncate(
         setup.field().hint(),
         (g.w - 2 * m) as f32,
@@ -1206,9 +1327,53 @@ fn draw_setup_head(
         g.hint_base,
         hint_size,
         Weight::Regular,
-        GRAY_40,
+        GRAY_20,
         Align::Left,
     );
+}
+
+/// Obszar, który obejmuje etykietę pola, ramkę wartości i podpowiedź.
+fn edit_field_area(g: &SetupGeom) -> Rect {
+    let top = g.label_base as i32 - 26;
+    let bottom = g.hint_base as i32 + 8;
+    Rect::new(0, top, g.w, bottom - top)
+}
+
+/// Przerysowuje w ISTNIEJĄCYM płótnie sam obszar edytowanej wartości.
+///
+/// Zwraca prostokąt do wypchnięcia na panel. Kosztuje ułamek pełnej klatki: nie ma
+/// tu ani czyszczenia 518 KB płótna, ani rysowania sześćdziesięciu klawiszy.
+pub fn redraw_setup_value(setup: &Setup, fonts: &Fonts, c: &mut Gray8) -> Rect {
+    let g = SetupGeom::of(c, setup);
+    let area = edit_field_area(&g);
+    c.fill_rect(area, WHITE);
+    let mut throwaway = Screen::default();
+    draw_edit_field(setup, fonts, c, &mut throwaway, &g);
+    area
+}
+
+/// Przerysowuje w istniejącym płótnie wskazane klawisze.
+///
+/// `pressed` decyduje, który z nich idzie w negatywie. Klawisze spoza listy zostają
+/// nietknięte — o to właśnie chodzi.
+pub fn redraw_setup_keys(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    rects: &[Rect],
+    pressed: Option<Rect>,
+) {
+    if rects.is_empty() {
+        return;
+    }
+    let g = SetupGeom::of(c, setup);
+    let mut throwaway = Screen::default();
+    // Klawisz w negatywie zostawia po sobie czarne wypełnienie, więc pod spodem
+    // trzeba wyczyścić — `draw_key` rysuje ramkę, nie tło.
+    for rect in rects {
+        c.fill_rect(*rect, WHITE);
+    }
+    draw_keyboard_filtered(setup, fonts, c, &mut throwaway, &g, pressed, Some(rects));
 }
 
 /// Lista wszystkich pól z tym, co urządzenie ma zapamiętane.
@@ -1250,12 +1415,12 @@ fn draw_setup_summary(
         "zapamiętane",
         m as f32,
         (top + 12) as f32,
-        16.0,
+        19.0,
         Weight::Medium,
-        GRAY_40,
+        GRAY_20,
         Align::Left,
     );
-    hline(c, m, top + HEAD_H - 6, g.w - 2 * m, 1, GRAY_80);
+    hline(c, m, top + HEAD_H - 6, g.w - 2 * m, 1, GRAY_40);
 
     for (i, field) in Field::ALL.into_iter().enumerate() {
         let y = top + HEAD_H + i as i32 * row_h;
@@ -1272,20 +1437,20 @@ fn draw_setup_summary(
             field.tab(),
             m as f32,
             baseline,
-            18.0,
+            20.0,
             weight,
-            if active { BLACK } else { GRAY_40 },
+            if active { BLACK } else { GRAY_20 },
             Align::Left,
         );
 
         let value = summary_value(setup, field);
-        let value = fonts.truncate(&value, (g.w - 2 * m - LABEL_W) as f32, 18.0, weight);
+        let value = fonts.truncate(&value, (g.w - 2 * m - LABEL_W) as f32, 20.0, weight);
         fonts.draw(
             c,
             &value,
             (m + LABEL_W) as f32,
             baseline,
-            18.0,
+            20.0,
             weight,
             BLACK,
             Align::Left,
@@ -1327,7 +1492,30 @@ enum KeyStyle {
     Filled,
 }
 
-fn draw_keyboard(setup: &Setup, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen, g: &SetupGeom) {
+fn draw_keyboard(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    screen: &mut Screen,
+    g: &SetupGeom,
+    pressed: Option<Rect>,
+) {
+    draw_keyboard_filtered(setup, fonts, c, screen, g, pressed, None);
+}
+
+/// Rysuje klawiaturę; przy `only = Some(..)` **rysuje wyłącznie wskazane klawisze**,
+/// ale obszary dotykowe wypełnia tak samo dla wszystkich.
+#[allow(clippy::too_many_arguments)]
+fn draw_keyboard_filtered(
+    setup: &Setup,
+    fonts: &Fonts,
+    c: &mut Gray8,
+    screen: &mut Screen,
+    g: &SetupGeom,
+    pressed: Option<Rect>,
+    only: Option<&[Rect]>,
+) {
+    let wanted = |r: Rect| only.is_none_or(|list| list.contains(&r));
     let rows = setup.page().rows();
     let caps = setup.caps().is_active();
     let size = if g.compact { 24.0 } else { 28.0 };
@@ -1348,7 +1536,16 @@ fn draw_keyboard(setup: &Setup, fonts: &Fonts, c: &mut Gray8, screen: &mut Scree
             } else {
                 ch.to_string()
             };
-            draw_key(fonts, c, rect, &label, size, KeyStyle::Normal);
+            if wanted(rect) {
+                draw_key(
+                    fonts,
+                    c,
+                    rect,
+                    &label,
+                    size,
+                    pressed_style(KeyStyle::Normal, rect, pressed),
+                );
+            }
             screen.hits.push(HitRegion::new(rect, Action::Key(ch)));
         }
     }
@@ -1393,7 +1590,16 @@ fn draw_keyboard(setup: &Setup, fonts: &Fonts, c: &mut Gray8, screen: &mut Scree
     for (units, label, action, style) in bar {
         let w = g.span(units);
         let rect = Rect::new(x, bar_y, w, g.key_h);
-        draw_key(fonts, c, rect, label, bar_size, style);
+        if wanted(rect) {
+            draw_key(
+                fonts,
+                c,
+                rect,
+                label,
+                bar_size,
+                pressed_style(style, rect, pressed),
+            );
+        }
         screen.hits.push(HitRegion::new(rect, action));
         x += w + g.gap;
     }
@@ -1401,7 +1607,13 @@ fn draw_keyboard(setup: &Setup, fonts: &Fonts, c: &mut Gray8, screen: &mut Scree
 
 fn draw_key(fonts: &Fonts, c: &mut Gray8, r: Rect, label: &str, size: f32, style: KeyStyle) {
     match style {
-        KeyStyle::Normal => stroke_round_rect(c, r, 8.0, 2, GRAY_40),
+        // Ramka klawisza MUSI być czarna. Przy `GRAY_40` (0x66) klawiatura była
+        // ledwo widoczna: panel słabo rozróżnia jasne półtony, a `MODE_DU` — czyli
+        // każde odświeżenie w oknie interaktywnym — jest dwupoziomowy i tak czy owak
+        // sprowadza szarość do bieli albo czerni. Objawiało się to tym, że klawisz
+        // stawał się czytelny dopiero po naciśnięciu, bo dopiero wtedy przechodził
+        // przez DU.
+        KeyStyle::Normal => stroke_round_rect(c, r, 8.0, 2, BLACK),
         KeyStyle::Marked => stroke_round_rect(c, r, 8.0, 4, BLACK),
         KeyStyle::Filled => fill_round_rect(c, r, 8.0, BLACK),
     }
@@ -1922,6 +2134,110 @@ mod tests {
         assert!(hit.rect.h >= 44, "obszar {} px jest za niski", hit.rect.h);
     }
 
+    /// Ekran startowy obiecuje „krok 1 — dotknij ekranu". Ta obietnica ma pokrycie
+    /// w przycisku na środku, a nie w plakietce 44 px przy krawędzi.
+    /// Przerysowanie przyrostowe musi dać **te same piksele**, co pełny render.
+    /// Inaczej ekran konfiguracji rozjeżdżałby się z tym, co firmware myśli, że rysuje.
+    #[test]
+    fn przyrostowe_odrysowanie_zgadza_sie_z_pelnym() {
+        use crate::setup::Field;
+
+        let fonts = Fonts::embedded();
+        let mut przed = Setup::new();
+        przed.set(Field::Ssid, "Dom".to_string());
+        let mut po = Setup::new();
+        po.set(Field::Ssid, "Doma".to_string());
+
+        for rot in [Rotation::Portrait, Rotation::Landscape] {
+            // Płótno w stanie „przed", potem przyrostowo doprowadzone do „po".
+            let mut a = Gray8::new(rot);
+            let screen = render_setup(&przed, &fonts, &mut a);
+            let area = redraw_setup_value(&po, &fonts, &mut a);
+
+            // Płótno wyrenderowane od zera w stanie „po".
+            let mut b = Gray8::new(rot);
+            let _ = render_setup(&po, &fonts, &mut b);
+
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    assert_eq!(
+                        a.get(x, y),
+                        b.get(x, y),
+                        "{rot:?}: pole wartości, piksel ({x}, {y})"
+                    );
+                }
+            }
+
+            // To samo dla klawisza w negatywie.
+            let klawisz = screen
+                .hits
+                .iter()
+                .find(|h| matches!(h.action, Action::Key(_)))
+                .expect("klawiatura ma klawisze")
+                .rect;
+
+            let mut c1 = Gray8::new(rot);
+            let _ = render_setup(&po, &fonts, &mut c1);
+            redraw_setup_keys(&po, &fonts, &mut c1, &[klawisz], Some(klawisz));
+
+            let mut c2 = Gray8::new(rot);
+            let _ = render_setup_pressed(&po, &fonts, &mut c2, Some(klawisz));
+
+            for y in klawisz.y..klawisz.bottom() {
+                for x in klawisz.x..klawisz.right() {
+                    assert_eq!(
+                        c1.get(x, y),
+                        c2.get(x, y),
+                        "{rot:?}: klawisz w negatywie, piksel ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nieskonfigurowane_urzadzenie_ma_przycisk_konfiguracji_na_srodku() {
+        let fonts = Fonts::embedded();
+        for rot in [Rotation::Portrait, Rotation::Landscape] {
+            let mut model = Model::empty(dt(12, 0));
+            model.net = NetState::NeedsAuth;
+            let mut c = Gray8::new(rot);
+            let screen = render(&model, &fonts, &mut c);
+
+            let srodek = (c.width() as i32 / 2, c.height() as i32 / 2);
+            assert_eq!(
+                screen.hit(srodek.0, srodek.1),
+                Some(Action::OpenSetup),
+                "{rot:?}: stuknięcie w środek ekranu ma otwierać konfigurację"
+            );
+
+            let przycisk = screen
+                .hits
+                .iter()
+                .find(|h| h.action == Action::OpenSetup && h.rect.h >= SETUP_BUTTON_H)
+                .expect("brak przycisku konfiguracji");
+            assert!(
+                przycisk.rect.w >= 300,
+                "{rot:?}: przycisk {} px szerokości to za mało",
+                przycisk.rect.w
+            );
+        }
+    }
+
+    /// Skonfigurowane urządzenie z pustym kalendarzem nie dostaje przycisku —
+    /// jest co pokazać, tylko akurat nic nie ma w planie.
+    #[test]
+    fn skonfigurowane_urzadzenie_bez_wydarzen_nie_ma_przycisku_konfiguracji() {
+        let fonts = Fonts::embedded();
+        let model = Model::empty(dt(12, 0));
+        let mut c = Gray8::new(Rotation::Portrait);
+        let screen = render(&model, &fonts, &mut c);
+        assert_eq!(
+            screen.hit(c.width() as i32 / 2, c.height() as i32 / 2),
+            None
+        );
+    }
+
     #[test]
     fn nieskonfigurowane_urzadzenie_prowadzi_do_konfiguracji_z_naglowka() {
         let fonts = Fonts::embedded();
@@ -1980,6 +2296,10 @@ mod tests {
 
         for napis in [
             "Konfiguracja",
+            "Skonfiguruj",
+            "sieć i adres kalendarza",
+            "Nic w planie",
+            "Wolne do końca widocznego okresu",
             "komplet — naciśnij zapisz",
             "brakuje:",
             "zapamiętane",

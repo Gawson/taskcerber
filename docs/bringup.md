@@ -36,26 +36,67 @@ boot do gotowości: 312 ms
 | Co widać | Co to znaczy |
 |---|---|
 | `CISZA` przy którymś adresie | ten układ nie odpowiada — albo magistrala, albo zasilanie sekcji |
+| `CISZA` **przy 0x5D** | jedyny adres, przy którym cisza w raporcie nic nie znaczy: skan idzie przed sekwencją resetu GT911, a kontroler do tej chwili siedzi w resecie. Rozstrzyga dopiero linia `GT911: 911` z okna interaktywnego |
 | `0x14  GT911 pod ADRESEM ZAPASOWYM` | sekwencja resetu ustawia `INT` odwrotnie; **dotyk i tak działa**, firmware sam się przełącza |
+| `wybudzenie: Touch` | urządzenie obudziło się od dotknięcia ekranu, nie od BOOT-a ani timera |
+| `budzenie: sam BOOT — T_INT stoi nisko` | tryb przerwania GT911 (rejestr `0x804D`) trzyma `INT` w dole w spoczynku, więc budzenie dotykiem musi zostać wyłączone — inaczej byłaby pętla wybudzeń |
+| `GT911 niedostępny — dotyk nie zadziała` | kontroler nie wstał po sekwencji resetu. Pierwsze podejrzenie: `T_RST` został w zatrzasku po poprzednim śnie — patrz `power::shutdown::release_pin_holds` |
 | `RTC: wariant Pcf85063` | sprzeczność ze schematu rozstrzygnięta na niekorzyść sterownika — trzeba zmienić mapę rejestrów |
 | `RTC: flaga VL ustawiona` | bateryjka RTC pusta albo pierwszy start; czas przyjdzie z SNTP |
 | `PSRAM: 0 B` | octal PSRAM nie wstało; epdiy alokuje przez `assert()`, więc następny krok to abort |
 | `boot do gotowości > 600 ms` | pomiar 5: memtest PSRAM albo walidacja obrazu przy każdym wybudzeniu |
 | `boot #2` i dalej rosnące | pomiar 4: `.rtc.data` przeżywa deep sleep, linker nie wyciął sekcji |
 
+### Kiedy urządzenie śpi — widać to na ekranie
+
+Przy `SLEEP_MARKER = true` (domyślnie, na czas bring-upu) urządzenie tuż przed
+zaśnięciem zaczernia kwadracik 22 × 22 px w prawym dolnym rogu płótna i zostawia go
+tam na cały sen — e-papier nie potrzebuje zasilania, żeby go utrzymać. Znika sam przy
+pierwszym przerysowaniu po wybudzeniu.
+
+**Czarny róg = śpi, dotyk nic nie da. Brak = czuwa.** Bez tego nie da się odróżnić
+„urządzenie mnie ignoruje" od „urządzenie śpi", bo obraz na szkle jest w obu
+wypadkach ten sam. Stała jest w `firmware/src/main.rs`.
+
+### Budzenie dotykiem
+
+`WAKE_ON_TOUCH` (też `main.rs`) decyduje, czy GT911 zostaje przy życiu na czas snu.
+Przy `true` `T_RST` jest zatrzaskiwany w GÓRZE, a `T_INT` (GPIO3, pin RTC) dokłada
+się do maski `ext1` obok BOOT-a — dotknięcie ekranu budzi urządzenie. **Kosztuje
+prąd**: kontroler skanuje przez cały sen. Przy `false` kontroler idzie w reset,
+prąd spada do zera i budzi wyłącznie BOOT.
+
 ### Osie dotyku — jedyny sposób, żeby je ustawić
 
-Orientacja GT911 względem panelu jest w kodzie **założeniem**. Rozstrzyga się je
-w dwie minuty: dotknij czterech rogów ekranu i przeczytaj log.
+**Obrót nie jest już zgadywany.** Kontroler sam mówi, w jakim układzie liczy —
+firmware czyta jego rejestry rozdzielczości przy zimnym starcie i wypisuje:
+
+```
+GT911: 911
+GT911: rozdzielczość 540x960 -> kontroler obrócony o 90°, przeliczam
+```
+
+`960x540` znaczy, że kontroler liczy tak jak skanuje panel i nic nie trzeba
+przeliczać. `540x960` znaczy, że jest zamontowany o 90° — firmware sam wtedy
+przelicza (`x = raw_y`, `y = 539 - raw_x`), dokładnie tak jak crate
+`lilygo-t5s3paperpro` dla tej samej płytki. **Ta sama binarka obsługuje oba warianty.**
+
+Zostają lustra, bo te z rozdzielczości nie wynikają: sam obrót nie mówi, którą
+stroną przyklejono szkło. Rozstrzyga je dotknięcie czterech rogów.
 
 ```
 dotyk: panel (12, 8) -> płótno (531, 12) -> Focus(Ssid)
 dotyk: panel (12, 8) -> płótno (531, 12), brak obszaru
 ```
 
-Interesuje pierwsza para — to, co zwraca kontroler. Lewy górny róg **fizycznego**
-ekranu powinien dać coś bliskiego `(0, 0)`. Jeśli daje co innego, poprawka to trzy
-stałe w `firmware/src/board/gt911.rs`:
+Linia `feedback dotyku: N ms` obok mówi, ile trwało częściowe odświeżenie obszaru
+pod palcem. To jest ta odpowiedź, która ma przyjść, zanim zacznie się cokolwiek dziać
+pod przyciskiem; jeśli zbliża się do pełnego DU (~280 ms), obszar dotykowy jest
+za duży albo `epd_hl_update_area` dostaje prostokąt na całą szerokość panelu.
+
+Interesuje pierwsza para — punkt **po przeliczeniu do układu panelu**. Lewy górny
+róg fizycznego ekranu powinien dać coś bliskiego `(0, 0)`. Jeśli daje co innego,
+poprawka to dwie stałe w `firmware/src/board/gt911.rs`:
 
 | Lewy górny róg zwraca | Ustaw |
 |---|---|
@@ -63,7 +104,10 @@ stałe w `firmware/src/board/gt911.rs`:
 | ~(0, 540) | `FLIP_Y = true` |
 | ~(960, 0) | `FLIP_X = true` |
 | ~(960, 540) | `FLIP_X` i `FLIP_Y` |
-| `x` rośnie przy ruchu w **dół** ekranu | `SWAP_XY = true` (i sprawdź lustra jeszcze raz) |
+
+Liczby powyżej zakresu panelu (`x` rzędu 50 000, `y` rzędu 15 000) to **nie** kwestia
+osi, tylko przesunięcia w mapie rejestrów: blok pierwszego punktu zaczyna się pod
+`0x814F`, nie `0x8150`. Patrz `REG_POINT1`.
 
 ### Energia bez PPK2
 

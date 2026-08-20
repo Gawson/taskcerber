@@ -94,6 +94,30 @@ impl Rotation {
         }
     }
 
+    /// Przelicza PROSTOKĄT z układu płótna na układ panelu.
+    ///
+    /// Ta sama macierz, co [`Rotation::panel_to_canvas`], tylko w drugą stronę i na
+    /// całym obszarze. Potrzebna do częściowego odświeżenia: `epd_hl_update_area`
+    /// przyjmuje obszar we współrzędnych panelu, a obszary dotykowe z
+    /// [`crate::hit::Screen`] są w układzie płótna. Bez tego natychmiastowy feedback
+    /// pod palcem odrysowywałby prostokąt obrócony o 90°, czyli w losowym miejscu.
+    ///
+    /// W pionie zamieniają się też wymiary: prostokąt `w × h` na płótnie jest
+    /// `h × w` na panelu.
+    pub const fn canvas_rect_to_panel(self, r: Rect) -> Rect {
+        match self {
+            Self::Landscape if LANDSCAPE_FLIPPED => Rect::new(
+                PANEL_WIDTH as i32 - r.right(),
+                PANEL_HEIGHT as i32 - r.bottom(),
+                r.w,
+                r.h,
+            ),
+            Self::Landscape => r,
+            // panel_x = canvas_y, panel_y = PANEL_HEIGHT - 1 - canvas_x.
+            Self::Portrait => Rect::new(r.y, PANEL_HEIGHT as i32 - r.right(), r.h, r.w),
+        }
+    }
+
     /// Odczyt z NVS. Cokolwiek nierozpoznanego daje wartość domyślną — konfiguracja
     /// z przyszłej wersji nie ma prawa zablokować bootu.
     ///
@@ -245,6 +269,24 @@ impl Gray8 {
     }
 
     /// Wypełnia prostokąt na sztywno (bez antyaliasingu — krawędzie są całkowite).
+    /// Odwraca jasność pikseli w prostokącie: czarne robią się białe i odwrotnie.
+    ///
+    /// Do potwierdzenia dotknięcia. Zalanie obszaru czernią jest tańsze, ale zakrywa
+    /// to, w co użytkownik właśnie trafił — a chce zobaczyć, że trafił **w to**.
+    /// Odwrócenie działa na dowolnej treści, więc nie wymaga, żeby układ graficzny
+    /// wiedział cokolwiek o stanie „wciśnięty".
+    pub fn invert_rect(&mut self, r: Rect) {
+        let x0 = r.x.max(0);
+        let y0 = r.y.max(0);
+        let x1 = r.right().min(self.w as i32);
+        let y1 = r.bottom().min(self.h as i32);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.set(x, y, 0xFF - self.get(x, y));
+            }
+        }
+    }
+
     pub fn fill_rect(&mut self, r: Rect, level: u8) {
         let x0 = r.x.max(0);
         let y0 = r.y.max(0);
@@ -274,6 +316,41 @@ impl Gray8 {
     ///
     /// # Panics
     /// Jeśli `out.len() != PACKED_LEN`.
+    /// Pakuje do bufora epdiy **wyłącznie wskazany prostokąt panelu**.
+    ///
+    /// `pack4` przechodzi 259 200 bajtów wyjścia, a każdy wymaga dwóch odczytów
+    /// z płótna w poprzek jego wierszy — przy obrocie o 90° to jest chodzenie po
+    /// PSRAM-ie krokiem równym szerokości płótna, czyli chybianie w każdej linii
+    /// pamięci podręcznej. Przy pełnym odświeżeniu (~1,5 s) to ginie. Przy
+    /// częściowym, gdzie sam panel robi swoje w kilkadziesiąt milisekund, to jest
+    /// **cały koszt** — i to on sprawiał, że klawiatura przyjmowała jeden znak na
+    /// kilkaset milisekund.
+    ///
+    /// Prostokąt jest w układzie panelu i zostaje rozszerzony do pełnych bajtów:
+    /// jeden bajt to dwa sąsiednie piksele, a oba i tak czytamy z płótna, więc
+    /// zapisanie całego bajtu jest poprawne, nie przybliżone.
+    pub fn pack4_rect(&self, out: &mut [u8], panel: Rect) {
+        assert_eq!(
+            out.len(),
+            PACKED_LEN,
+            "bufor docelowy musi mieć dokładnie {PACKED_LEN} bajtów"
+        );
+        let stride = PANEL_WIDTH / 2;
+        let xh0 = (panel.x.max(0) as usize / 2).min(stride);
+        let xh1 = ((panel.right().max(0) as usize).div_ceil(2)).min(stride);
+        let y0 = panel.y.clamp(0, PANEL_HEIGHT as i32) as usize;
+        let y1 = panel.bottom().clamp(0, PANEL_HEIGHT as i32) as usize;
+
+        for py in y0..y1 {
+            let dst = py * stride;
+            for xh in xh0..xh1 {
+                let even = self.panel_sample(xh * 2, py);
+                let odd = self.panel_sample(xh * 2 + 1, py);
+                out[dst + xh] = (odd & 0xF0) | (even >> 4);
+            }
+        }
+    }
+
     pub fn pack4(&self, out: &mut [u8]) {
         assert_eq!(
             out.len(),
@@ -357,6 +434,96 @@ mod tests {
         } else {
             b & 0x0F
         }
+    }
+
+    /// Prostokąt przeliczony na panel musi pokrywać DOKŁADNIE te piksele panelu,
+    /// na które trafiają piksele płótna z wnętrza prostokąta — ani jednego mniej
+    /// (zostałby nieodświeżony pasek), ani jednego więcej.
+    #[test]
+    fn prostokat_plotna_pokrywa_sie_z_obszarem_panelu() {
+        for rotation in ORIENTACJE {
+            let (cw, ch) = rotation.canvas_size();
+            for rect in [
+                Rect::new(0, 0, 10, 20),
+                Rect::new(7, 11, 63, 29),
+                Rect::new(cw as i32 - 30, ch as i32 - 40, 30, 40),
+                Rect::new(0, 0, cw as i32, ch as i32),
+            ] {
+                let panel = rotation.canvas_rect_to_panel(rect);
+                assert_eq!(
+                    panel.w * panel.h,
+                    rect.w * rect.h,
+                    "{rotation:?}: pole prostokąta ma się zgadzać"
+                );
+                for x in rect.x..rect.right() {
+                    for y in rect.y..rect.bottom() {
+                        let (px, py) = canvas_to_panel(rotation, x as usize, y as usize);
+                        let (px, py) = (px as i32, py as i32);
+                        assert!(
+                            px >= panel.x && px < panel.right(),
+                            "{rotation:?}: płótno ({x},{y}) -> panel x={px} poza {panel:?}"
+                        );
+                        assert!(
+                            py >= panel.y && py < panel.bottom(),
+                            "{rotation:?}: płótno ({x},{y}) -> panel y={py} poza {panel:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pakowanie prostokąta musi dawać dokładnie te same bajty, co pakowanie całości
+    /// — inaczej częściowe odświeżenie zostawiałoby szew na krawędzi obszaru.
+    #[test]
+    fn pakowanie_prostokata_zgadza_sie_z_caloscia() {
+        for rotation in ORIENTACJE {
+            let mut c = Gray8::new(rotation);
+            for i in 0..c.width() as i32 {
+                c.set(i, i % c.height() as i32, BLACK);
+                c.set(i, (i * 7) % c.height() as i32, 0x77);
+            }
+            let pelne = c.to_packed();
+
+            for rect in [
+                Rect::new(0, 0, PANEL_WIDTH as i32, PANEL_HEIGHT as i32),
+                Rect::new(13, 29, 71, 43),
+                Rect::new(0, 0, 8, 8),
+                Rect::new(PANEL_WIDTH as i32 - 9, PANEL_HEIGHT as i32 - 5, 9, 5),
+            ] {
+                let mut czesciowe = vec![0u8; PACKED_LEN];
+                c.pack4_rect(&mut czesciowe, rect);
+
+                let stride = PANEL_WIDTH / 2;
+                let xh0 = rect.x as usize / 2;
+                let xh1 = (rect.right() as usize).div_ceil(2);
+                for py in rect.y as usize..rect.bottom() as usize {
+                    for xh in xh0..xh1 {
+                        assert_eq!(
+                            czesciowe[py * stride + xh],
+                            pelne[py * stride + xh],
+                            "{rotation:?} {rect:?}: bajt ({xh}, {py})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn odwrocenie_prostokata_jest_swoja_odwrotnoscia() {
+        let mut c = Gray8::new(Rotation::Portrait);
+        c.set(10, 10, BLACK);
+        c.set(11, 10, 0x40);
+        let rect = Rect::new(5, 5, 20, 20);
+        c.invert_rect(rect);
+        assert_eq!(c.get(10, 10), 0xFF);
+        assert_eq!(c.get(11, 10), 0xBF);
+        assert_eq!(c.get(6, 6), 0x00, "biel ma się zrobić czernią");
+        assert_eq!(c.get(100, 100), 0xFF, "poza prostokątem bez zmian");
+        c.invert_rect(rect);
+        assert_eq!(c.get(10, 10), BLACK);
+        assert_eq!(c.get(11, 10), 0x40);
     }
 
     #[test]

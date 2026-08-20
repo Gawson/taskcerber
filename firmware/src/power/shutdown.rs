@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use esp_idf_svc::sys;
-use log::warn;
+use log::{info, warn};
 
 use crate::board::Board;
 use crate::epd::Epd;
@@ -32,9 +32,11 @@ const EPD_PINS: [i32; 13] = [
 const BL_EN: i32 = 11;
 /// Reset kontrolera dotyku GT911.
 const TOUCH_RST: i32 = 9;
+/// Przerwanie kontrolera dotyku. Pin w domenie RTC, więc **może** budzić z deep sleepu.
+const TOUCH_INT: i32 = 3;
 
-/// Zdejmuje zatrzaski z magistrali panelu. **Woła się przy każdym starcie, przed
-/// dotknięciem panelu.**
+/// Zdejmuje zatrzaski GPIO założone przed snem. **Woła się przy każdym starcie,
+/// przed dotknięciem panelu i przed sekwencją resetu dotyku.**
 ///
 /// [`isolate_epd_bus`] woła `rtc_gpio_isolate()`, a ta funkcja — cytat z `rtc_io.h` —
 /// „disables input, output, pullup, pulldown, and **enables hold feature** for an
@@ -51,12 +53,32 @@ const TOUCH_RST: i32 = 9;
 /// firmware'u jest czysty, bo reset z zasilania żadnych zatrzasków nie zostawia,
 /// i to właśnie maskuje błąd przy bring-upie.
 ///
-/// STH, LEH, STV i CKV nie są pinami RTC, więc `isolate_epd_bus` ich nie zatrzaskuje,
-/// a `gpio_deep_sleep_hold_en()` działa — zgodnie z `gpio.h` — wyłącznie na padach,
-/// dla których wołano wcześniej `gpio_hold_en()`. Te wołamy tylko dla podświetlenia
-/// i resetu dotyku, i te zostają trzymane celowo.
-pub fn release_epd_bus_hold() {
-    for pin in EPD_PINS {
+/// STH, LEH, STV i CKV nie są pinami RTC, więc `isolate_epd_bus` ich nie zatrzaskuje.
+///
+/// # Druga połowa tej samej pułapki: `BL_EN` i `TOUCH_RST`
+///
+/// [`prepare_for_deep_sleep`] **celowo** zatrzaskuje te dwa piny w dole
+/// (`set_low_and_hold`) — podświetlenie ma nie świecić, a GT911 w resecie kosztuje
+/// zero zamiast 70–120 µA. Obydwa są pinami zdolnymi do RTC, więc `gpio_hold_en`
+/// schodzi w ESP-IDF do `rtc_gpio_hold_en` (`esp_driver_gpio/src/gpio.c`), a taki
+/// zatrzask **przeżywa deep sleep i wybudzenie**.
+///
+/// Nie zdejmuje go nic z tego, co wygląda, jakby powinno: `gpio_reset_pin` woła
+/// `rtc_gpio_deinit`, a ta przełącza wyłącznie multiplekser funkcji na cyfrowy
+/// (`esp_driver_gpio/src/rtc_io.c`) — bitu HOLD nie rusza. `gpio_set_direction`
+/// i `gpio_set_level` zapisują rejestry, których pad w zatrzasku nie czyta.
+///
+/// Skutek dla dotyku jest dokładnie taki: **pierwszy start po wgraniu firmware'u
+/// ma dotyk, każdy następny już nie.** Reset z zasilania czyści domenę RTC i maskuje
+/// błąd przy bring-upie; po pierwszym własnym śnie `T_RST` zostaje przybity do zera,
+/// GT911 nigdy nie wstaje i `Gt911::new` kończy się „nie odpowiada ani pod 0x5D,
+/// ani pod 0x14". Przycisk obrotu działa dalej, bo wisi na ekspanderze I²C — czyli
+/// objaw wygląda na zepsuty wyłącznie kontroler dotyku.
+///
+/// Firmware vendora robi to samo w pierwszych trzech liniach `setup()`:
+/// `gpio_hold_dis(BOARD_TOUCH_RST); gpio_hold_dis(BOARD_LORA_RST); gpio_deep_sleep_hold_dis();`
+pub fn release_pin_holds() {
+    for pin in EPD_PINS.into_iter().chain([BL_EN, TOUCH_RST]) {
         // SAFETY: numery pinów są stałe i poprawne dla tej płytki. Dla pinów spoza
         // domeny RTC `gpio_hold_dis` zwraca błąd, który tu nie ma znaczenia — te piny
         // i tak nigdy nie zostały zatrzaśnięte.
@@ -67,6 +89,14 @@ pub fn release_epd_bus_hold() {
                 sys::gpio_hold_dis(pin);
             }
         }
+    }
+
+    // Globalna zgoda na trzymanie padów CYFROWYCH przez sen, założona przez
+    // `gpio_deep_sleep_hold_en()` w kroku 8. Zdejmuje ją tylko jawne wywołanie albo
+    // reset z zasilania — inaczej STH, LEH, STV i CKV zostają w stanie sprzed snu.
+    // SAFETY: wywołanie bezstanowe z ESP-IDF.
+    unsafe {
+        sys::gpio_deep_sleep_hold_dis();
     }
 }
 
@@ -97,10 +127,19 @@ pub fn prepare_for_deep_sleep(epd: &mut Epd, board: &Board, keep_touch_alive: bo
     // 4. Podświetlenie.
     set_low_and_hold(BL_EN);
 
-    // 5. GT911 trzymany w resecie.
-    //    Tryb uśpienia samego kontrolera kosztuje 70–120 µA; reset kosztuje zero,
-    //    ale wtedy nie ma budzenia dotykiem.
-    if !keep_touch_alive {
+    // 5. GT911: reset albo praca dalej.
+    //
+    //    Reset kosztuje zero prądu, ale wtedy dotyk nie budzi — a urządzenie, którego
+    //    nie da się obudzić dotknięciem, wygląda po prostu na zepsute. Zostawiony przy
+    //    życiu kontroler skanuje dalej i to widać w budżecie: rząd wielkości więcej
+    //    niż cała reszta uśpionego urządzenia.
+    //
+    //    Zatrzask jest konieczny w OBU wariantach. Bez niego pad wraca po zaśnięciu
+    //    do stanu domyślnego i kontroler wpada w reset niezależnie od tego, czego
+    //    chcieliśmy.
+    if keep_touch_alive {
+        set_high_and_hold(TOUCH_RST);
+    } else {
         set_low_and_hold(TOUCH_RST);
     }
 
@@ -148,10 +187,18 @@ fn isolate_epd_bus() {
 }
 
 fn set_low_and_hold(pin: i32) {
+    set_level_and_hold(pin, 0);
+}
+
+fn set_high_and_hold(pin: i32) {
+    set_level_and_hold(pin, 1);
+}
+
+fn set_level_and_hold(pin: i32, level: u32) {
     // SAFETY: numer pinu stały, wywołania bezstanowe.
     unsafe {
         sys::gpio_set_direction(pin, sys::gpio_mode_t_GPIO_MODE_OUTPUT);
-        sys::gpio_set_level(pin, 0);
+        sys::gpio_set_level(pin, level);
         sys::gpio_hold_en(pin);
     }
 }
@@ -168,18 +215,97 @@ pub fn deep_sleep_for(seconds: u64) -> ! {
     }
 }
 
-/// Włącza budzenie przyciskiem BOOT (GPIO0, aktywny stanem niskim).
+/// Włącza budzenie przyciskiem BOOT, a jeśli się da — także **dotknięciem ekranu**.
 ///
-/// Wołane przed [`deep_sleep_for`], żeby dało się obudzić urządzenie ręcznie
-/// bez czekania na timer.
-pub fn enable_button_wakeup() -> Result<()> {
+/// BOOT (GPIO0) jest jedynym przyciskiem tej płytki, który w ogóle trafia na pin MCU
+/// zdolny do RTC — reszta wisi na I²C albo na `EN`, patrz `docs/hardware.md` §5b.
+/// Ale `T_INT` z GT911 siedzi na GPIO3, też w domenie RTC, więc dotyk może być drugim
+/// źródłem `ext1` i jest to jedyny sposób, żeby urządzenie dawało się obudzić bez
+/// szukania przycisku po omacku.
+///
+/// # Dlaczego poziom `INT` jest sprawdzany, a nie zakładany
+///
+/// GT911 ma cztery tryby przerwania, wybierane w jego konfiguracji (`0x804D`), i dwa
+/// z nich trzymają `INT` w **dole** w spoczynku. Przy takim trybie maska `ANY_LOW`
+/// wyzwoliłaby się natychmiast po zaśnięciu i urządzenie wpadłoby w pętlę wybudzeń,
+/// która rozładowuje ogniwo w kilka godzin i wygląda jak losowe restarty. Dlatego
+/// pin jest odczytywany tuż przed snem i budzenie dotykiem włącza się **tylko wtedy,
+/// gdy linia faktycznie stoi wysoko**. Gdy stoi nisko, zostaje sam BOOT i log mówi,
+/// dlaczego.
+///
+/// `keep_touch_alive` musi być zgodne z tym, co dostał [`prepare_for_deep_sleep`] —
+/// kontroler trzymany w resecie nie ma czym przerwać.
+pub fn enable_wakeup(keep_touch_alive: bool) -> Result<()> {
     const BOOT: u64 = 1 << 0;
-    // SAFETY: maska dotyczy istniejącego pinu zdolnego do RTC.
+    let mut mask = BOOT;
+
+    if keep_touch_alive {
+        // Podciągnięcie, zanim cokolwiek odczytamy. Bez niego `T_INT` bywa pinem
+        // pływającym — gdy w tym cyklu nie otwierało się okno dotyku, kontroler nie
+        // dostał sekwencji resetu i niczego nie steruje. Pływający pin z maską
+        // `ANY_LOW` to generator losowych wybudzeń. Podciągnięcie nie maskuje przy tym
+        // przypadku, przed którym się bronimy: kontroler trzymający `INT` w dole
+        // w spoczynku przeciąga słabe podciągnięcie i nadal odczytamy zero.
+        // SAFETY: numer pinu stały, wywołania bezstanowe.
+        let idle_high = unsafe {
+            sys::gpio_set_direction(TOUCH_INT, sys::gpio_mode_t_GPIO_MODE_INPUT);
+            sys::gpio_set_pull_mode(TOUCH_INT, sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            sys::gpio_get_level(TOUCH_INT) != 0
+        };
+        if idle_high {
+            mask |= 1 << TOUCH_INT;
+            info!("budzenie: BOOT albo dotyk");
+        } else {
+            warn!(
+                "budzenie: sam BOOT — T_INT stoi nisko w spoczynku, więc maska ANY_LOW \
+                 wyzwoliłaby się natychmiast. Tryb przerwania GT911 jest w rejestrze 0x804D"
+            );
+        }
+    } else {
+        info!("budzenie: sam BOOT");
+    }
+
+    // SAFETY: maska dotyczy istniejących pinów zdolnych do RTC.
     unsafe {
         sys::esp_sleep_enable_ext1_wakeup_io(
-            BOOT,
+            mask,
             sys::esp_sleep_ext1_wakeup_mode_t_ESP_EXT1_WAKEUP_ANY_LOW,
         );
     }
     Ok(())
+}
+
+/// Co nas obudziło: `ext1` z BOOT-a, `ext1` z dotyku, czy timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wakeup {
+    Timer,
+    Button,
+    Touch,
+}
+
+impl Wakeup {
+    /// Czy przy urządzeniu ktoś jest. Timer nie znaczy nic, jedno i drugie `ext1` — tak.
+    pub fn by_human(self) -> bool {
+        !matches!(self, Self::Timer)
+    }
+}
+
+/// Odczytuje źródło wybudzenia.
+pub fn wakeup_source() -> Wakeup {
+    // SAFETY: proste gettery z ESP-IDF.
+    let (cause, mask) = unsafe {
+        (
+            sys::esp_sleep_get_wakeup_cause(),
+            sys::esp_sleep_get_ext1_wakeup_status(),
+        )
+    };
+    if cause != sys::esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT1 {
+        return Wakeup::Timer;
+    }
+    if mask & (1 << TOUCH_INT) != 0 {
+        Wakeup::Touch
+    } else {
+        Wakeup::Button
+    }
 }

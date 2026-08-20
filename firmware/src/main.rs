@@ -106,14 +106,20 @@ fn main() {
 }
 
 fn run(mut state: RtcState) -> Result<u64> {
+    // Czytamy to na samym początku: rejestry źródła wybudzenia opisują stan sprzed
+    // tego bootu i nie ma powodu, żeby cokolwiek zdążyło je zmienić.
+    let wakeup = shutdown::wakeup_source();
+    info!("wybudzenie: {wakeup:?}");
+
     let peripherals = Peripherals::take().context("nie mogę przejąć peryferiów")?;
     let sysloop = EspSystemEventLoop::take().context("nie mogę przejąć pętli zdarzeń")?;
     let nvs_partition = EspDefaultNvsPartition::take().context("nie mogę przejąć partycji NVS")?;
 
-    // --- 0. Zwolnij zatrzaski magistrali panelu --------------------------------
-    // Musi być przed `Epd::new()`. Bez tego po każdym wybudzeniu z deep sleepu panel
-    // dostaje śmieci zamiast obrazu — pełne wyjaśnienie przy `release_epd_bus_hold`.
-    shutdown::release_epd_bus_hold();
+    // --- 0. Zwolnij zatrzaski GPIO z poprzedniego snu --------------------------
+    // Musi być przed `Epd::new()` i przed pierwszym `Gt911::open`. Bez tego po każdym
+    // wybudzeniu z deep sleepu panel dostaje śmieci zamiast obrazu, a GT911 zostaje
+    // przybity do resetu — pełne wyjaśnienie przy `release_pin_holds`.
+    shutdown::release_pin_holds();
 
     // --- 1. Magistrala I²C i natychmiastowe zgaszenie szyny LoRa/GPS -----------
     let bus = I2cBus::new().context("nie mogę zestawić magistrali I2C")?;
@@ -177,6 +183,10 @@ fn run(mut state: RtcState) -> Result<u64> {
 
     let mut net_state = NetState::Ok;
     let mut events = Vec::new();
+    // CRC treści, która JEST na szkle. Trzymamy je osobno, bo `record_success`
+    // nadpisuje `state.last_content_crc` zaraz po udanym pobraniu — porównanie
+    // z polem stanu byłoby wtedy porównaniem wartości z samą sobą.
+    let painted_crc = state.last_content_crc;
     let mut content_crc = state.last_content_crc;
     let mut fetched = false;
 
@@ -258,45 +268,70 @@ fn run(mut state: RtcState) -> Result<u64> {
         warn!("nie mogę odzyskać bitu przycisku na ekspanderze: {e:#}");
     }
 
-    let content_changed = content_crc != state.last_content_crc || !fetched;
+    // Porównujemy z CRC sprzed pobrania, nie z polem stanu — patrz `painted_crc`.
+    // Przeciw `state.last_content_crc` warunek był tożsamościowo fałszywy po każdym
+    // udanym pobraniu, czyli panel nie odświeżał się już nigdy po pierwszym boocie,
+    // a razem z nim nie otwierało się okno dotyku.
+    let content_changed = content_crc != painted_crc || !fetched;
     // Wybudzenie przyciskiem zawsze rysuje. Ktoś nacisnął, więc czegoś od urządzenia
     // chce — a za chwilę może chcieć obrócić ekran, co bez świeżej klatki nie ma sensu.
-    let woke_by_button = woken_by_button();
+    let woke_by_button = wakeup.by_human();
     let needs_paint =
         content_changed || state.boot_count <= 1 || net_state != NetState::Ok || woke_by_button;
 
-    if needs_paint {
+    let boot_count = state.boot_count;
+    let interact = wants_interaction(
+        config.is_provisioned(),
+        power_status.usb_present,
+        boot_count,
+        woke_by_button,
+    );
+
+    // Dotyk NIE zależy od tego, czy akurat malujemy klatkę — zależność idzie
+    // w drugą stronę: to dotknięcie powoduje przerysowanie. Mapa obszarów dotykowych
+    // powstaje z samego `dashboard::render`, czyli z czystego CPU (0,4–1,4 ms), więc
+    // okno da się otworzyć bez podnoszenia szyn panelu. Wcześniej pętla interaktywna
+    // siedziała w środku `if needs_paint` i skonfigurowane urządzenie na kablu,
+    // z niezmienioną treścią, nie dostawało okna w ogóle.
+    if needs_paint || interact {
         let model = if config.is_provisioned() {
             build_model(now, events, fuel, power_status.usb_present, net_state)
         } else {
             provisioning_model(now)
         };
+
         // Pierwsze rysowanie w tym wybudzeniu MUSI być pełne — `back_fb` epdiy
         // powstał przed chwilą wyzerowany do bieli i nie wie nic o tym, co zostało
         // na szkle. Dopiero kolejne, w oknie interaktywnym, mogą być szybkie.
-        let screen = match paint(
-            &mut epd,
-            &model,
-            &mut state,
-            temperature,
-            rotation,
-            Refresh::Full,
-        ) {
-            Ok(screen) => screen,
-            Err(e) => {
-                // Nieudane malowanie nie zwalnia nas z poprawnego zaśnięcia.
-                error!("rysowanie nie powiodło się: {e:#}");
-                dashboard::Screen::default()
+        //
+        // `panel_synced` niesie tę wiedzę dalej: dopóki jest fałszywe, epdiy nie ma
+        // prawdziwego punktu odniesienia, więc ani szybkie odświeżenie, ani tym
+        // bardziej częściowe (feedback pod palcem) nie dałoby poprawnej różnicy.
+        let (canvas, screen, panel_synced) = if needs_paint {
+            match paint(
+                &mut epd,
+                &model,
+                &mut state,
+                temperature,
+                rotation,
+                Refresh::Full,
+            ) {
+                Ok((canvas, screen)) => (canvas, screen, true),
+                Err(e) => {
+                    // Nieudane malowanie nie zwalnia nas z poprawnego zaśnięcia.
+                    error!("rysowanie nie powiodło się: {e:#}");
+                    let (canvas, screen) = render_frame(&model, rotation);
+                    (canvas, screen, false)
+                }
             }
+        } else {
+            info!("treść bez zmian — panel zostaje, otwieram samo okno dotyku");
+            let (canvas, screen) = render_frame(&model, rotation);
+            (canvas, screen, false)
         };
+        let mut canvas = canvas;
 
-        let boot_count = state.boot_count;
-        if wants_interaction(
-            config.is_provisioned(),
-            power_status.usb_present,
-            boot_count,
-            woke_by_button,
-        ) {
+        if interact {
             let changed = interactive_loop(
                 &mut epd,
                 &bus,
@@ -304,7 +339,9 @@ fn run(mut state: RtcState) -> Result<u64> {
                 &mut store,
                 &mut state,
                 &model,
+                canvas,
                 screen,
+                panel_synced,
                 temperature,
                 rotation,
                 if config.is_provisioned() {
@@ -319,9 +356,13 @@ fn run(mut state: RtcState) -> Result<u64> {
                 info!("konfiguracja zmieniona — pobieram przy najbliższym wybudzeniu");
                 state.request_fetch();
             }
+        } else if panel_synced {
+            // Urządzenie narysowało klatkę i wraca spać bez okna dotyku — znacznik
+            // ma się pojawić także tutaj, bo z zewnątrz to jest ten sam stan.
+            mark_going_to_sleep(&mut epd, &mut canvas, rotation, temperature);
         }
     } else {
-        info!("treść bez zmian — pomijam odświeżenie panelu");
+        info!("treść bez zmian i nikogo przy urządzeniu — pomijam odświeżenie panelu");
     }
 
     // --- 7. Sekwencja wyłączania i sen -----------------------------------------
@@ -335,9 +376,9 @@ fn run(mut state: RtcState) -> Result<u64> {
     state.last_known_unix = net::time::now_unix();
     state.store();
 
-    shutdown::prepare_for_deep_sleep(&mut epd, &hw, false);
-    if let Err(e) = shutdown::enable_button_wakeup() {
-        warn!("nie mogę włączyć budzenia przyciskiem: {e:#}");
+    shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
+    if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
+        warn!("nie mogę włączyć budzenia: {e:#}");
     }
 
     Ok(sleep_s)
@@ -500,7 +541,21 @@ fn paint(
     temperature_c: i32,
     rotation: Rotation,
     mode: Refresh,
-) -> Result<dashboard::Screen> {
+) -> Result<(Gray8, dashboard::Screen)> {
+    let (canvas, screen) = render_frame(model, rotation);
+    present(epd, &canvas, state, temperature_c, mode)?;
+    Ok((canvas, screen))
+}
+
+/// Rysuje klatkę do pamięci i **nie dotyka panelu**.
+///
+/// Rozdzielenie tych dwóch rzeczy jest tym, co pozwala otworzyć okno dotyku bez
+/// odświeżania ekranu: mapa obszarów dotykowych jest produktem ubocznym renderowania,
+/// a renderowanie to czysty CPU. Panel kosztuje ~115 mA i sekundę, render — ułamek
+/// milisekunda i nic.
+///
+/// Płótno wraca razem z mapą, bo feedback pod palcem odrysowuje jego fragment.
+fn render_frame(model: &Model, rotation: Rotation) -> (Gray8, dashboard::Screen) {
     let fonts = Fonts::embedded();
     let mut canvas = Gray8::new(rotation);
 
@@ -508,8 +563,7 @@ fn paint(
     let screen = dashboard::render(model, &fonts, &mut canvas);
     info!("render: {} ms", started.elapsed().as_millis());
 
-    present(epd, &canvas, state, temperature_c, mode)?;
-    Ok(screen)
+    (canvas, screen)
 }
 
 /// Wypycha gotowe płótno na panel.
@@ -569,7 +623,7 @@ fn provisioning_model(now: NaiveDateTime) -> Model {
     model.firmware = format!("t5s3pro {VERSION}");
     model.net = NetState::NeedsAuth;
     model.tiles = vec![
-        dashboard::model::Tile::new("krok 1", "dotknij ekranu"),
+        dashboard::model::Tile::new("krok 1", "Skonfiguruj"),
         dashboard::model::Tile::new("krok 2", "wpisz sieć"),
         dashboard::model::Tile::new("krok 3", "wpisz adres iCal"),
     ];
@@ -581,12 +635,13 @@ fn unix_to_local(unix: i64, tz: chrono_tz::Tz) -> Option<NaiveDateTime> {
     tz.timestamp_opt(unix, 0).single().map(|d| d.naive_local())
 }
 
-/// Czy to wybudzenie przyszło z przycisku, czy z timera.
-fn woken_by_button() -> bool {
-    // SAFETY: prosty getter z ESP-IDF.
-    let cause = unsafe { esp_idf_svc::sys::esp_sleep_get_wakeup_cause() };
-    cause == esp_idf_svc::sys::esp_sleep_source_t_ESP_SLEEP_WAKEUP_EXT1
-}
+/// Czy urządzenie ma zostawiać kontroler dotyku przy życiu na czas snu, żeby
+/// dotknięcie mogło je obudzić.
+///
+/// Kosztuje prąd — GT911 skanuje dalej — i to jest świadoma wymiana: urządzenie,
+/// którego nie da się obudzić dotknięciem ekranu, jest w użyciu nieodróżnialne
+/// od zepsutego. Wyłączenie tej stałej wraca do wybudzania samym BOOT-em.
+const WAKE_ON_TOUCH: bool = true;
 
 /// Ile milisekund bez zdarzenia zamyka okno interaktywne agendy.
 const IDLE_MS: u64 = 20_000;
@@ -625,6 +680,110 @@ const EDITS_BEFORE_FULL: u8 = epd::FAST_REFRESHES_BEFORE_FULL;
 fn wants_interaction(provisioned: bool, usb: bool, boot_count: u32, woke_by_button: bool) -> bool {
     woke_by_button || usb || (!provisioned && boot_count <= 1)
 }
+
+/// Czytnik dotyku chodzący we WŁASNYM wątku.
+///
+/// # Dlaczego to musi być osobny wątek
+///
+/// Wypchnięcie klatki na panel blokuje wołającego na cały przebieg fali — na tym
+/// panelu ~0,3 s dla `MODE_DU`. Dopóki odczyt GT911 siedział w tej samej pętli,
+/// przez ten czas **nikt nie odpytywał kontrolera**, a GT911 trzyma w rejestrze
+/// dokładnie jeden punkt: każde naciśnięcie poza ostatnim przepadało bezpowrotnie.
+/// Żadne kolejkowanie po stronie rysowania tego nie naprawi, bo kolejkować nie ma
+/// czego — zdarzenia giną w kontrolerze, zanim ktokolwiek je zobaczy.
+///
+/// Wątek czyta więc niezależnie od rysowania i wrzuca zbocza do kanału. Klawisze
+/// naciśnięte w trakcie odświeżania czekają w kolejce i wchodzą do modelu, gdy tylko
+/// pętla główna wróci — na ekranie pojawiają się wszystkie naraz.
+///
+/// # Współdzielenie magistrali
+///
+/// Wątek gada z GT911 po tej samej magistrali I²C, po której epdiy obsługuje
+/// TPS65185 i ekspander. Jest to bezpieczne, bo sterownik `i2c_master` serializuje
+/// transakcje semaforem `bus_lock_mux`.
+enum Touch {
+    /// Nic nowego w kolejce.
+    Idle,
+    /// Naciśnięcie, we współrzędnych panelu.
+    Point(board::gt911::TouchPoint),
+    /// Wątek się poddał — kontroler przestał odpowiadać.
+    Dead,
+}
+
+struct TouchReader {
+    rx: std::sync::mpsc::Receiver<board::gt911::TouchPoint>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TouchReader {
+    /// Zabiera kontroler na własność i uruchamia wątek.
+    fn spawn(touch: board::gt911::Gt911) -> Result<Self> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+
+        let join = std::thread::Builder::new()
+            .stack_size(4096)
+            .spawn(move || {
+                let mut finger = FingerEdge::default();
+                let mut errors = 0u8;
+                while !flag.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(TOUCH_POLL_MS));
+                    match finger.press(&touch) {
+                        Ok(Some(point)) => {
+                            errors = 0;
+                            if tx.send(point).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => errors = 0,
+                        Err(e) => {
+                            errors += 1;
+                            if errors >= TOUCH_ERRORS_BEFORE_GIVING_UP {
+                                warn!("dotyk nie odpowiada, zamykam czytnik: {e:#}");
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .context("nie mogę uruchomić wątku dotyku")?;
+
+        Ok(Self {
+            rx,
+            stop,
+            join: Some(join),
+        })
+    }
+
+    /// Kolejne zdarzenie z kolejki, bez czekania.
+    fn poll(&self) -> Touch {
+        match self.rx.try_recv() {
+            Ok(point) => Touch::Point(point),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Touch::Idle,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Touch::Dead,
+        }
+    }
+}
+
+impl Drop for TouchReader {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Odstęp odpytywania GT911 w wątku dotyku.
+///
+/// Kontroler skanuje szkło co 5–15 ms, więc częściej nie ma sensu. To jest jedyne
+/// miejsce, gdzie ten odstęp cokolwiek znaczy — pętla rysująca nie czeka już na dotyk.
+const TOUCH_POLL_MS: u64 = 8;
 
 /// Wykrywanie zbocza dotyku.
 ///
@@ -691,7 +850,9 @@ fn interactive_loop(
     store: &mut Store,
     state: &mut RtcState,
     model: &Model,
+    mut canvas: Gray8,
     mut screen: dashboard::Screen,
+    mut panel_synced: bool,
     temperature_c: i32,
     mut rotation: Rotation,
     window_ms: u64,
@@ -699,11 +860,12 @@ fn interactive_loop(
 ) -> bool {
     use std::time::{Duration, Instant};
 
-    let touch = board::gt911::open(bus, verbose);
-    let mut finger = FingerEdge::default();
+    // Kontroler idzie na własność wątkowi czytającemu — od tej chwili rysowanie
+    // i odbiór dotyku są od siebie niezależne. Patrz `TouchReader`.
+    let reader = board::gt911::open(bus, verbose)
+        .and_then(|touch| TouchReader::spawn(touch).map_err(|e| warn!("{e:#}")).ok());
     let mut custom = Button::new(hw.expander.button_pressed().unwrap_or(false));
     let mut model = model.clone();
-    let mut errors = 0u8;
 
     info!("okno interaktywne: {window_ms} ms");
     let mut deadline = Instant::now() + Duration::from_millis(window_ms);
@@ -717,31 +879,30 @@ fn interactive_loop(
             if let Err(e) = store.set_rotation(rotation) {
                 warn!("nie mogę zapisać obrotu: {e:#}");
             }
-            screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Full);
+            (canvas, screen) = repaint(
+                epd,
+                &model,
+                state,
+                temperature_c,
+                rotation,
+                Refresh::Full,
+                &mut panel_synced,
+            );
             deadline = Instant::now() + Duration::from_millis(window_ms);
             continue;
         }
 
-        let Some(touch) = touch.as_ref() else {
+        let Some(reader) = reader.as_ref() else {
             continue;
         };
 
-        let point = match finger.press(touch) {
-            Ok(point) => {
-                errors = 0;
-                point
+        let point = match reader.poll() {
+            Touch::Point(point) => point,
+            Touch::Idle => continue,
+            Touch::Dead => {
+                warn!("dotyk nie odpowiada, zamykam okno");
+                break;
             }
-            Err(e) => {
-                errors += 1;
-                if errors >= TOUCH_ERRORS_BEFORE_GIVING_UP {
-                    warn!("dotyk nie odpowiada, zamykam okno: {e:#}");
-                    break;
-                }
-                continue;
-            }
-        };
-        let Some(point) = point else {
-            continue;
         };
 
         // Dotyk przychodzi w układzie PANELU, obszary są w układzie płótna.
@@ -751,45 +912,120 @@ fn interactive_loop(
         // tych linii jest jedynym sposobem, żeby ją ustawić. Patrz `SWAP_XY` w
         // `board::gt911`.
         let (x, y) = rotation.panel_to_canvas(point.x, point.y);
-        let Some(action) = screen.hit(x, y) else {
+        let Some(region) = screen.hit_region(x, y).copied() else {
             info!(
                 "dotyk: panel ({}, {}) -> płótno ({x}, {y}), brak obszaru",
                 point.x, point.y
             );
             continue;
         };
+        let action = region.action;
         info!(
             "dotyk: panel ({}, {}) -> płótno ({x}, {y}) -> {action:?}",
             point.x, point.y
         );
         deadline = Instant::now() + Duration::from_millis(window_ms);
 
+        // Mignięcie pod palcem TYLKO tam, gdzie akcja sama z siebie nie da odpowiedzi.
+        //
+        // Każde wypchnięcie na panel kosztuje pełny przebieg DU niezależnie od
+        // wielkości obszaru — epdiy taktuje wszystkie bramki tak czy owak, patrz
+        // `Epd::present_areas`. Miganie przed akcją, która i tak przemaluje ekran,
+        // podwaja więc czas reakcji zamiast go skrócić: przewrócenie strony trwałoby
+        // dwa przebiegi zamiast jednego.
+        //
+        // Zostaje tam, gdzie naprawdę jest potrzebne: `RefreshNow` nie zmienia na
+        // ekranie nic, a wejście w konfigurację trwa ponad sekundę.
+        //
+        // Mignięcie jest poprawne także wtedy, gdy `panel_synced` jest fałszywe,
+        // i to nie przypadkiem: `back_fb` epdiy jest wtedy biały, więc różnica na tym
+        // prostokącie to „wszystko, co nie jest bielą" — a my zalewamy go czernią,
+        // czyli każdy piksel obszaru dostaje impuls i wychodzi czarny niezależnie od
+        // tego, co tam było.
+        let slow_or_silent = matches!(action, Action::OpenSetup | Action::RefreshNow);
+        let flashed =
+            slow_or_silent && flash_region(epd, &mut canvas, region.rect, rotation, temperature_c);
+        let mut repainted = false;
+
         match action {
             Action::OpenSetup => {
-                if setup_screen(epd, touch, store, state, temperature_c, rotation) {
+                if setup_screen(epd, reader, store, state, temperature_c, rotation) {
                     // Po zapisie nie ma na co czekać: ekran pod spodem pokazuje stan
                     // sprzed konfiguracji, a prawdziwa treść wymaga sięgnięcia po sieć,
                     // czyli osobnego wybudzenia. Wychodzimy od razu, zamiast trzymać
                     // urządzenie na jawie przez pełne okno bezczynności.
+                    mark_going_to_sleep(epd, &mut canvas, rotation, temperature_c);
                     return true;
                 }
-                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Full);
+                // Ekran konfiguracji ma własne, DŁUŻSZE okno bezczynności (90 s), więc
+                // po wyjściu z niego termin okna agendy jest z definicji przeterminowany
+                // — pętla kończyłaby się natychmiast po przerysowaniu i urządzenie
+                // zasypiałoby w chwili, w której użytkownik dopiero zobaczył ekran
+                // główny. Wyglądało to dokładnie jak martwy dotyk.
+                deadline = Instant::now() + Duration::from_millis(window_ms);
+                panel_synced = true;
+                (canvas, screen) = repaint(
+                    epd,
+                    &model,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Full,
+                    &mut panel_synced,
+                );
+                repainted = true;
             }
             Action::NextPage => {
                 model.page += 1;
-                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+                (canvas, screen) = repaint(
+                    epd,
+                    &model,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Fast,
+                    &mut panel_synced,
+                );
+                repainted = true;
             }
             Action::PrevPage => {
                 model.page = model.page.saturating_sub(1);
-                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+                (canvas, screen) = repaint(
+                    epd,
+                    &model,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Fast,
+                    &mut panel_synced,
+                );
+                repainted = true;
             }
             Action::ShowEvent(i) => {
                 model.focus = Some(i);
-                screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+                (canvas, screen) = repaint(
+                    epd,
+                    &model,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Fast,
+                    &mut panel_synced,
+                );
+                repainted = true;
             }
             Action::Back => {
                 if model.focus.take().is_some() {
-                    screen = repaint(epd, &model, state, temperature_c, rotation, Refresh::Fast);
+                    (canvas, screen) = repaint(
+                        epd,
+                        &model,
+                        state,
+                        temperature_c,
+                        rotation,
+                        Refresh::Fast,
+                        &mut panel_synced,
+                    );
+                    repainted = true;
                 }
             }
             Action::RefreshNow => {
@@ -802,10 +1038,23 @@ fn interactive_loop(
             // Akcje ekranu konfiguracji nie mają tu obszarów dotykowych.
             _ => {}
         }
+
+        // Akcja, która nic nie przerysowała, zostawiłaby czarny prostokąt pod palcem.
+        // Odrysowujemy sam ten obszar z czystego renderu — to znowu ułamek klatki.
+        if flashed && !repainted {
+            let (fresh, fresh_screen) = render_frame(&model, rotation);
+            canvas = fresh;
+            screen = fresh_screen;
+            let area = rotation.canvas_rect_to_panel(region.rect);
+            if let Err(e) = epd.present_area(&canvas, area, temperature_c) {
+                warn!("nie mogę przywrócić obszaru pod palcem: {e:#}");
+            }
+        }
     }
 
     // Dotąd docieramy wyłącznie po wyczerpaniu okna bezczynności albo po awarii
     // dotyku — czyli bez zapisanej konfiguracji.
+    mark_going_to_sleep(epd, &mut canvas, rotation, temperature_c);
     false
 }
 
@@ -815,7 +1064,7 @@ fn interactive_loop(
 /// dotykać na [`SETUP_IDLE_MS`]. Zwraca `true`, jeśli cokolwiek zapisano.
 fn setup_screen(
     epd: &mut Epd,
-    touch: &board::gt911::Gt911,
+    reader: &TouchReader,
     store: &mut Store,
     state: &mut RtcState,
     temperature_c: i32,
@@ -837,66 +1086,212 @@ fn setup_screen(
     setup.set(Field::Ota, config.ota_url.clone().unwrap_or_default());
 
     info!("ekran konfiguracji");
-    let mut screen = repaint_setup(epd, &setup, state, temperature_c, rotation, Refresh::Full);
+    let fonts = Fonts::embedded();
+    // Płótno żyje przez cały ekran konfiguracji i jest przerysowywane PRZYROSTOWO.
+    // Pełna klatka to alokacja 518 KB w PSRAM, wyczyszczenie jej do bieli i narysowanie
+    // sześćdziesięciu klawiszy — przy każdym znaku. Panel przy DU to pięć faz po
+    // 540 linii, czyli rząd wielkości mniej, niż się wydawało: `frame_time` z waveformu
+    // jest używany tylko w ścieżce I2S, a ta płytka idzie przez LCD. Wąskim gardłem
+    // było więc rysowanie, nie szkło.
+    let (mut canvas, mut screen) = repaint_setup(
+        epd,
+        &setup,
+        state,
+        temperature_c,
+        rotation,
+        Refresh::Full,
+        None,
+    );
 
-    let mut finger = FingerEdge::default();
+    // Wykrywanie zbocza siedzi w wątku czytającym i jest ciągłe przez oba ekrany,
+    // więc palec wciąż leżący na szkle po wejściu tutaj nie generuje fantomowego
+    // naciśnięcia, a po powrocie nie gubi się pierwsze stuknięcie.
     let mut edits = 0u8;
-    let mut errors = 0u8;
     let mut deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
+
+    // Stan wyświetlania trzymamy jako różnicę dwóch rzeczy: co panel POKAZUJE i co
+    // POWINIEN pokazywać. Wypchnięcie zdarza się wtedy i tylko wtedy, gdy te dwie
+    // rzeczy się rozjeżdżają, a nie za każdym naciśnięciem.
+    let mut want_pressed: Option<dashboard::Rect> = None;
+    let mut pending_since: Option<Instant> = None;
+    let mut force_push = false;
+    let mut last_input = Instant::now();
+    // Prostokąty tknięte od ostatniego wypchnięcia — klawisze, które zmieniły stan.
+    let mut touched: Vec<dashboard::Rect> = Vec::new();
 
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
 
-        let point = match finger.press(touch) {
-            Ok(point) => {
-                errors = 0;
-                point
-            }
-            Err(e) => {
-                errors += 1;
-                if errors >= TOUCH_ERRORS_BEFORE_GIVING_UP {
-                    warn!("dotyk nie odpowiada, zamykam konfigurację: {e:#}");
+        // --- 1. Opróżnij kolejkę do dna ---------------------------------------
+        //
+        // Wątek czytający zbierał zdarzenia także wtedy, gdy stalismy w sterowniku
+        // panelu, więc po dłuższym odświeżeniu czeka ich tu kilka. Bierzemy WSZYSTKIE
+        // za jednym razem — po to jest ta kolejka. Brane po jednym na obrót pętli
+        // dokładałyby po `SAMPLE_MS` opóźnienia na znak.
+        let mut got_input = false;
+        loop {
+            let point = match reader.poll() {
+                Touch::Point(point) => point,
+                Touch::Idle => break,
+                Touch::Dead => {
+                    warn!("dotyk nie odpowiada, zamykam konfigurację");
+                    epd.hold_power(false);
                     return false;
                 }
+            };
+
+            let (x, y) = rotation.panel_to_canvas(point.x, point.y);
+            let Some(region) = screen.hit_region(x, y).copied() else {
+                info!(
+                    "dotyk: panel ({}, {}) -> płótno ({x}, {y}), brak obszaru",
+                    point.x, point.y
+                );
                 continue;
-            }
-        };
-        let Some(point) = point else {
-            continue;
-        };
+            };
+            got_input = true;
+            deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
+            last_input = Instant::now();
 
-        let (x, y) = rotation.panel_to_canvas(point.x, point.y);
-        let Some(action) = screen.hit(x, y) else {
-            info!(
-                "dotyk: panel ({}, {}) -> płótno ({x}, {y}), brak obszaru",
-                point.x, point.y
-            );
-            continue;
-        };
-        deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
+            match setup.apply(region.action) {
+                Applied::Save => {
+                    epd.hold_power(false);
+                    let saved = save_setup(store, &setup);
+                    info!("konfiguracja zapisana: {saved}");
+                    return saved;
+                }
+                Applied::Relayout => {
+                    // Inna strona klawiatury albo inne pole — zmienia się pół ekranu
+                    // i mapa obszarów dotykowych. Mapę odświeżamy OD RAZU, w pamięci,
+                    // żeby kolejne zdarzenia z tej samej kolejki trafiały już w nowy
+                    // układ; na panel to i tak pójdzie niżej, jedną klatką.
+                    force_push = true;
+                    screen = render_setup_frame(&setup, rotation, None).1;
+                }
+                Applied::Edited => edits = edits.saturating_add(1),
+                Applied::Ignored => {}
+            }
 
-        match setup.apply(action) {
-            Applied::Ignored => {}
-            Applied::Save => {
-                let saved = save_setup(store, &setup);
-                info!("konfiguracja zapisana: {saved}");
-                return saved;
+            if let Some(prev) = want_pressed {
+                remember(&mut touched, prev);
             }
-            Applied::Edited | Applied::Relayout => {
-                let mode = if edits >= EDITS_BEFORE_FULL {
-                    edits = 0;
-                    Refresh::Full
-                } else {
-                    edits += 1;
-                    Refresh::Fast
-                };
-                screen = repaint_setup(epd, &setup, state, temperature_c, rotation, mode);
-            }
+            want_pressed = Some(region.rect);
+            remember(&mut touched, region.rect);
+            pending_since.get_or_insert_with(Instant::now);
         }
+        if got_input {
+            continue;
+        }
+
+        // --- 2. Palec zdjęty na dłużej: negatyw ma zgasnąć --------------------
+        if want_pressed.is_some() && last_input.elapsed() >= Duration::from_millis(KEY_HIGHLIGHT_MS)
+        {
+            if let Some(prev) = want_pressed {
+                remember(&mut touched, prev);
+            }
+            want_pressed = None;
+            pending_since.get_or_insert_with(Instant::now);
+        }
+
+        // --- 3. Czy już wypychać ---------------------------------------------
+        let Some(since) = pending_since else {
+            if last_input.elapsed() >= Duration::from_millis(POWER_HOLD_IDLE_MS) {
+                epd.hold_power(false);
+            }
+            continue;
+        };
+
+        // Czekamy na ciszę, ale nie dłużej niż `MAX_DEFER_MS`. Przy pisaniu ciągiem
+        // daje to jedną klatkę na kilka znaków zamiast jednej na znak; przy
+        // pojedynczym stuknięciu opóźnienie jest o rząd wielkości mniejsze niż sam
+        // przebieg DU, więc niewidoczne.
+        let quiet = last_input.elapsed() >= Duration::from_millis(COALESCE_MS);
+        let overdue = since.elapsed() >= Duration::from_millis(MAX_DEFER_MS);
+        if !(force_push || quiet || overdue) {
+            continue;
+        }
+
+        // --- 4. Jedna klatka nadrabiająca wszystko, co się wydarzyło ----------
+        let started = Instant::now();
+        epd.hold_power(true);
+        let periodic_full = edits >= EDITS_BEFORE_FULL;
+
+        if force_push || periodic_full {
+            let mode = if periodic_full {
+                edits = 0;
+                Refresh::Full
+            } else {
+                Refresh::Fast
+            };
+            let (fresh, fresh_screen) = repaint_setup(
+                epd,
+                &setup,
+                state,
+                temperature_c,
+                rotation,
+                mode,
+                want_pressed,
+            );
+            canvas = fresh;
+            screen = fresh_screen;
+            force_push = false;
+            info!("klatka pełna: {} ms", started.elapsed().as_millis());
+        } else {
+            // Przyrostowo: pole wartości i te klawisze, które zmieniły stan.
+            // Mapa obszarów dotykowych się nie zmienia — układ klawiatury jest ten sam,
+            // a zmiana układu idzie gałęzią wyżej.
+            let box_rect = dashboard::layout::redraw_setup_value(&setup, &fonts, &mut canvas);
+            dashboard::layout::redraw_setup_keys(
+                &setup,
+                &fonts,
+                &mut canvas,
+                &touched,
+                want_pressed,
+            );
+            let rendered = started.elapsed().as_millis();
+
+            let mut areas = Vec::with_capacity(touched.len() + 1);
+            areas.push(rotation.canvas_rect_to_panel(box_rect));
+            for rect in &touched {
+                areas.push(rotation.canvas_rect_to_panel(*rect));
+            }
+
+            if let Err(e) = epd.present_areas(&canvas, &areas, temperature_c) {
+                warn!("nie mogę odrysować klawiatury: {e:#}");
+            }
+            let total = started.elapsed().as_millis();
+            info!(
+                "klatka: {total} ms (render {rendered} ms, panel {} ms, {} obszarów)",
+                total - rendered,
+                areas.len()
+            );
+        }
+
+        touched.clear();
+        pending_since = None;
     }
 
     info!("konfiguracja: brak aktywności, wracam bez zapisu");
+    epd.hold_power(false);
     false
+}
+
+/// Dopisuje prostokąt do listy, jeśli jeszcze go tam nie ma.
+fn remember(list: &mut Vec<dashboard::Rect>, rect: dashboard::Rect) {
+    if !list.contains(&rect) {
+        list.push(rect);
+    }
+}
+
+/// Renderuje ekran konfiguracji do pamięci, bez dotykania panelu.
+fn render_setup_frame(
+    setup: &dashboard::setup::Setup,
+    rotation: Rotation,
+    pressed: Option<dashboard::Rect>,
+) -> (Gray8, dashboard::Screen) {
+    let fonts = Fonts::embedded();
+    let mut canvas = Gray8::new(rotation);
+    let screen = dashboard::layout::render_setup_pressed(setup, &fonts, &mut canvas, pressed);
+    (canvas, screen)
 }
 
 /// Przenosi zawartość ekranu do NVS.
@@ -937,16 +1332,59 @@ fn repaint(
     temperature_c: i32,
     rotation: Rotation,
     mode: Refresh,
-) -> dashboard::Screen {
+    synced: &mut bool,
+) -> (Gray8, dashboard::Screen) {
+    // Dopóki panel nie dostał w tym wybudzeniu pełnej klatki, `back_fb` epdiy kłamie
+    // — więc pierwsze przerysowanie idzie pełne niezależnie od tego, o co prosi
+    // wołający. Pełne wyjaśnienie przy `Epd::present`.
+    let mode = if *synced { mode } else { Refresh::Full };
     match paint(epd, model, state, temperature_c, rotation, mode) {
-        Ok(screen) => screen,
+        Ok(out) => {
+            *synced = true;
+            out
+        }
         Err(e) => {
             error!("przerysowanie nie powiodło się: {e:#}");
-            dashboard::Screen::default()
+            (Gray8::new(rotation), dashboard::Screen::default())
         }
     }
 }
 
+/// Natychmiastowa odpowiedź na dotknięcie: zaczernia trafiony obszar i odświeża
+/// **sam ten prostokąt**.
+///
+/// To jest oddzielone od wykonania akcji i takie ma zostać. Akcja pod przyciskiem
+/// bywa droga (pełna klatka, wejście w konfigurację, zapis do NVS) albo w ogóle
+/// niewidoczna (`RefreshNow` tylko odkłada życzenie na następne wybudzenie) —
+/// a człowiek musi wiedzieć, że urządzenie go usłyszało, zanim cokolwiek z tego
+/// się wydarzy. Na e-papierze brak odpowiedzi jest nieodróżnialny od zepsutego dotyku.
+///
+/// Zwraca `false`, gdy nie było czego mignąć — wtedy nie ma też czego przywracać.
+fn flash_region(
+    epd: &mut Epd,
+    canvas: &mut Gray8,
+    rect: dashboard::Rect,
+    rotation: Rotation,
+    temperature_c: i32,
+) -> bool {
+    // Odwrócenie, nie zalanie czernią: pod palcem ma zostać widoczne to, w co
+    // użytkownik trafił. Zakryty czarnym prostokątem guzik wygląda jak usterka.
+    canvas.invert_rect(rect);
+    let area = rotation.canvas_rect_to_panel(rect);
+    let started = std::time::Instant::now();
+    match epd.present_area(canvas, area, temperature_c) {
+        Ok(()) => {
+            info!("feedback dotyku: {} ms", started.elapsed().as_millis());
+            true
+        }
+        Err(e) => {
+            warn!("nie mogę odrysować obszaru pod palcem: {e:#}");
+            false
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn repaint_setup(
     epd: &mut Epd,
     setup: &dashboard::setup::Setup,
@@ -954,19 +1392,78 @@ fn repaint_setup(
     temperature_c: i32,
     rotation: Rotation,
     mode: Refresh,
-) -> dashboard::Screen {
-    let fonts = Fonts::embedded();
-    let mut canvas = Gray8::new(rotation);
-    let screen = dashboard::render_setup(setup, &fonts, &mut canvas);
-
+    pressed: Option<dashboard::Rect>,
+) -> (Gray8, dashboard::Screen) {
+    let (canvas, screen) = render_setup_frame(setup, rotation, pressed);
     if let Err(e) = present(epd, &canvas, state, temperature_c, mode) {
         error!("rysowanie konfiguracji nie powiodło się: {e:#}");
     }
-    screen
+    (canvas, screen)
 }
 
-/// Odstęp próbkowania przycisków.
-const SAMPLE_MS: u64 = 20;
+/// Czy rysować znacznik zasypiania. Rzecz na czas bring-upu: bez niego nie da się
+/// odróżnić „urządzenie mnie ignoruje" od „urządzenie śpi", bo e-papier trzyma obraz
+/// tak samo w obu wypadkach — a śpi prawie zawsze.
+const SLEEP_MARKER: bool = true;
+
+/// Bok kwadracika i jego odstęp od krawędzi płótna.
+const SLEEP_MARKER_SIZE: i32 = 22;
+const SLEEP_MARKER_MARGIN: i32 = 12;
+
+/// Zaczernia róg ekranu tuż przed zaśnięciem.
+///
+/// Znacznik zostaje na szkle przez cały sen, bo e-papier nie potrzebuje zasilania,
+/// żeby go utrzymać, i znika sam przy pierwszym przerysowaniu po wybudzeniu.
+/// Czarny kwadrat w rogu = urządzenie śpi i dotyk nic nie da. Brak = czuwa.
+fn mark_going_to_sleep(epd: &mut Epd, canvas: &mut Gray8, rotation: Rotation, temperature_c: i32) {
+    if !SLEEP_MARKER {
+        return;
+    }
+    let rect = dashboard::Rect::new(
+        canvas.width() as i32 - SLEEP_MARKER_MARGIN - SLEEP_MARKER_SIZE,
+        canvas.height() as i32 - SLEEP_MARKER_MARGIN - SLEEP_MARKER_SIZE,
+        SLEEP_MARKER_SIZE,
+        SLEEP_MARKER_SIZE,
+    );
+    canvas.fill_rect(rect, dashboard::canvas::BLACK);
+    let areas = [rotation.canvas_rect_to_panel(rect)];
+    if let Err(e) = epd.present_areas(canvas, &areas, temperature_c) {
+        warn!("nie mogę narysować znacznika snu: {e:#}");
+    }
+}
+
+/// Jak długo po PUSZCZENIU palca klawisz zostaje podświetlony.
+///
+/// Podświetlenie jest potwierdzeniem, a nie animacją, więc nie wolno mu niczego
+/// blokować: znak wpisuje się w tej samej chwili, w której klawisz się zaczernia,
+/// a gaszenie jest doklejane do następnego naciśnięcia albo — gdy następnego nie ma
+/// — robione po tym czasie bezczynności. Wcześniej było odwrotnie i przez to
+/// klawiatura przyjmowała jeden znak na pełne odświeżenie ekranu.
+const KEY_HIGHLIGHT_MS: u64 = 250;
+
+/// Po jakiej bezczynności opuszczamy szyny panelu w czasie pisania.
+const POWER_HOLD_IDLE_MS: u64 = 1_500;
+
+/// Ile ciszy na dotyku czekamy przed wypchnięciem klatki.
+///
+/// Przebieg DU trwa ~0,3 s i przez ten czas nie da się odpytywać dotyku — więc
+/// rysowanie na każde naciśnięcie ustawia twardy sufit: jeden znak na jedną klatkę,
+/// a wszystko, co użytkownik nacisnął w międzyczasie, przepada. Zamiast tego
+/// zbieramy naciśnięcia i rysujemy raz, gdy palec na chwilę odpuści.
+const COALESCE_MS: u64 = 15;
+
+/// …ale nie dłużej niż tyle od pierwszej niewypchniętej zmiany.
+///
+/// Bez tego pisanie równym rytmem szybszym niż `COALESCE_MS` odkładałoby klatkę
+/// w nieskończoność i ekran stałby martwy.
+const MAX_DEFER_MS: u64 = 220;
+
+/// Odstęp próbkowania przycisków i dotyku.
+///
+/// GT911 skanuje szkło co 5–15 ms, więc rzadsze odpytywanie dokłada się wprost do
+/// opóźnienia między dotknięciem a reakcją. Dziesięć milisekund kosztuje trochę
+/// ruchu na I²C, ale tylko na jawie — a na jawie i tak świeci panel.
+const SAMPLE_MS: u64 = 10;
 
 /// Ile kolejnych zgodnych próbek uznaje zmianę stanu za prawdziwą.
 ///

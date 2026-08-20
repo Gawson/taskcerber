@@ -26,10 +26,48 @@
 //! nie ma `impl Drop`.**
 
 use anyhow::{bail, Result};
-use dashboard::{Gray8, PACKED_LEN};
+use dashboard::{Gray8, Rect, PACKED_LEN};
 use esp_idf_svc::sys;
 
 use crate::i2c::I2cBus;
+
+/// Do ilu pikseli wyrównujemy obszar częściowego odświeżenia. Patrz
+/// [`Epd::present_area`].
+const AREA_ALIGN: i32 = 8;
+
+/// Otoczka prostokątna zbioru obszarów. Zakłada niepustą listę.
+fn hull_of(areas: &[Rect]) -> Rect {
+    let mut r = areas[0];
+    for a in &areas[1..] {
+        let x = r.x.min(a.x);
+        let y = r.y.min(a.y);
+        r = Rect::new(
+            x,
+            y,
+            r.right().max(a.right()) - x,
+            r.bottom().max(a.bottom()) - y,
+        );
+    }
+    r
+}
+
+/// Przycina obszar do panelu i wyrównuje do [`AREA_ALIGN`]. `None`, gdy po przycięciu
+/// nic nie zostaje — wtedy nie ma czego odświeżać.
+fn clamp_area(r: Rect) -> Option<Rect> {
+    let w = dashboard::PANEL_WIDTH as i32;
+    let h = dashboard::PANEL_HEIGHT as i32;
+
+    let x0 = (r.x.max(0) / AREA_ALIGN) * AREA_ALIGN;
+    let y0 = r.y.clamp(0, h);
+    let x1 = (r.right().min(w) + AREA_ALIGN - 1) / AREA_ALIGN * AREA_ALIGN;
+    let x1 = x1.min(w);
+    let y1 = r.bottom().clamp(0, h);
+
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+}
 
 /// Tryb odświeżania panelu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +85,8 @@ pub const FAST_REFRESHES_BEFORE_FULL: u8 = 12;
 pub struct Epd {
     hl: sys::EpdiyHighlevelState,
     powered: bool,
+    /// Blokada zejścia szyn między odświeżeniami — patrz [`Epd::hold_power`].
+    power_hold: bool,
 }
 
 impl Epd {
@@ -80,7 +120,11 @@ impl Epd {
             sys::epd_hl_init(std::ptr::null())
         };
 
-        Ok(Self { hl, powered: false })
+        Ok(Self {
+            hl,
+            powered: false,
+            power_hold: false,
+        })
     }
 
     /// Rozmiar panelu według epdiy — sprawdzane przy bring-upie względem naszych stałych.
@@ -130,7 +174,28 @@ impl Epd {
         }
     }
 
+    /// Zostawia szyny panelu podniesione między kolejnymi odświeżeniami.
+    ///
+    /// Sekwencja `epd_poweron`/`epd_poweroff` to rozmowa po I²C z TPS65185 i czekanie
+    /// na power-good — kilkadziesiąt milisekund w każdą stronę. Przy pełnej klatce
+    /// to nic; przy wpisywaniu z klawiatury, gdzie samo odświeżenie obszaru trwa tyle
+    /// samo, to podwaja czas odpowiedzi na każdy klawisz.
+    ///
+    /// **Nie zostawiać podniesionych szyn na dłuższą bezczynność** — panel ciągnie
+    /// wtedy ~115 mA, a HV na szkle bez odświeżania nie służy panelowi. Wołający ma
+    /// zwolnić blokadę, gdy tylko przestaje pisać; [`Epd::ensure_powered_off`] robi
+    /// to bezwarunkowo.
+    pub fn hold_power(&mut self, hold: bool) {
+        self.power_hold = hold;
+        if !hold {
+            self.power_off();
+        }
+    }
+
     fn power_off(&mut self) {
+        if self.power_hold {
+            return;
+        }
         if self.powered {
             // SAFETY: jw.
             unsafe { sys::epd_poweroff() };
@@ -206,9 +271,110 @@ impl Epd {
         Ok(())
     }
 
+    /// Odświeża **sam wskazany prostokąt** panelu, w trybie DU.
+    ///
+    /// Od tego zależy, czy dotknięcie przycisku daje natychmiastową odpowiedź.
+    /// Pełna klatka to 0,2–0,35 s nawet w DU, bo przebieg idzie przez wszystkie
+    /// 540 linii; obszar wielkości klawisza to ułamek tego czasu, bo `epd_draw_base`
+    /// dostaje krótszy zakres linii.
+    ///
+    /// `area` jest we współrzędnych **panelu** — przelicza je
+    /// [`dashboard::Rotation::canvas_rect_to_panel`]. Prostokąt jest przycinany do
+    /// panelu i wyrównywany do ośmiu pikseli: przy 4 bpp jeden bajt to dwa piksele,
+    /// a magistrala pakuje po cztery, więc obszar nierówny do bajtu potrafi zostawić
+    /// pionowy szew na krawędzi.
+    ///
+    /// **Wolno wołać dopiero po pełnym odświeżeniu w tym samym wybudzeniu.** Wcześniej
+    /// `back_fb` epdiy jest wyzerowany do bieli i nie opisuje tego, co jest na szkle —
+    /// różnica wyszłaby wtedy z niewłaściwego punktu odniesienia. Pilnuje tego wołający.
+    pub fn present_area(&mut self, canvas: &Gray8, area: Rect, temperature_c: i32) -> Result<()> {
+        self.present_areas(canvas, &[area], temperature_c)
+    }
+
+    /// Kilka prostokątów na **jednym** podniesieniu szyn.
+    ///
+    /// Naciśnięcie klawisza zmienia dwa miejsca naraz — sam klawisz i pole, w którym
+    /// pojawia się znak — a sekwencja `epd_poweron`/`epd_poweroff` kosztuje tyle samo
+    /// co niejeden z tych prostokątów. Robienie tego dwa razy pod rząd byłoby
+    /// zmarnowaniem połowy czasu odpowiedzi.
+    pub fn present_areas(
+        &mut self,
+        canvas: &Gray8,
+        areas: &[Rect],
+        temperature_c: i32,
+    ) -> Result<()> {
+        let areas: Vec<Rect> = areas.iter().copied().filter_map(clamp_area).collect();
+        if areas.is_empty() {
+            return Ok(());
+        }
+
+        self.power_on();
+        let mut blitted = Ok(());
+        for area in &areas {
+            // Pakujemy TYLKO te prostokąty. Przepakowanie całego płótna kosztuje
+            // więcej niż samo odświeżenie — patrz `Gray8::pack4_rect`.
+            if let Err(e) = self.blit_rect(canvas, *area) {
+                blitted = Err(e);
+                break;
+            }
+        }
+
+        // JEDNO wywołanie na całą otoczkę, nie po jednym na prostokąt.
+        //
+        // `epd_hl_update_area` wygląda, jakby koszt zależał od obszaru, i tak jest
+        // opisane w nagłówku epdiy. Nie jest: funkcja wylicza prostokąt zmian, po czym
+        // **jawnie go wyrzuca** i woła `epd_draw_base(epd_full_screen(), ...)`, licząc
+        // wyłącznie na tablicę `dirty_lines`. A w ścieżce wyjściowej LCD czysta linia
+        // też dostaje wysłany bufor (`render_lcd.c`, gałąź `!drawn_lines[...]` wypełnia
+        // go zerami i commituje) — bramki panelu są taktowane wszystkie, zawsze.
+        //
+        // Czyli: obszar wpływa na koszt PROCESORA (mniejsza różnica do policzenia,
+        // mniej linii do przygotowania), ale czas przebiegu na szkle jest stały
+        // i równy pełnemu DU. Trzy wywołania to trzy pełne przebiegi — przy pisaniu
+        // z klawiatury dokładnie tyle, ile widać jako opóźnienie.
+        let hull = hull_of(&areas);
+        // SAFETY: epdiy zainicjalizowane, szyny podniesione, obszar przycięty
+        // do wymiarów panelu i o dodatnich bokach.
+        let drawn = unsafe {
+            sys::epd_hl_update_area(
+                &mut self.hl,
+                sys::EpdDrawMode_MODE_DU,
+                temperature_c,
+                sys::EpdRect {
+                    x: hull.x,
+                    y: hull.y,
+                    width: hull.w,
+                    height: hull.h,
+                },
+            )
+        };
+
+        self.power_off();
+
+        blitted?;
+        if drawn != sys::EpdDrawError_EPD_DRAW_SUCCESS {
+            bail!("epd_hl_update_area zwróciło błąd {drawn}");
+        }
+        Ok(())
+    }
+
+    /// Przepisuje do bufora epdiy sam wskazany prostokąt panelu.
+    fn blit_rect(&mut self, canvas: &Gray8, area: Rect) -> Result<()> {
+        let fb = self.framebuffer();
+        if fb.len() != PACKED_LEN {
+            bail!(
+                "epdiy zwróciło framebuffer o długości {}, oczekiwano {PACKED_LEN}",
+                fb.len()
+            );
+        }
+        canvas.pack4_rect(fb, area);
+        Ok(())
+    }
+
     /// Gasi szyny panelu. Wołane w sekwencji przed snem, na wypadek gdyby
     /// [`Epd::flush`] wyszło ścieżką błędu.
     pub fn ensure_powered_off(&mut self) {
+        self.power_hold = false;
         self.power_off();
     }
 }

@@ -29,7 +29,7 @@ zwykłym `cargo test` — zamiast być debugowane przez wgrywanie i patrzenie na
 Wszystko poniżej działa na zwykłym stabilnym Ruście, bez toolchainu Xtensa.
 
 ```bash
-cargo test                              # 154 testy: render, iCal, dotyk, klawiatura, polityka, OTA
+cargo test                              # 157 testów: render, iCal, dotyk, klawiatura, polityka, OTA
 cargo run -p preview -- all             # zrzuty PNG do out/ (pionowo)
 cargo run -p preview -- all landscape   # to samo poziomo, pliki z sufiksem
 cargo run -p simulator                  # interaktywne okno, mysz jako dotyk
@@ -147,13 +147,27 @@ Jeśli ostrzeżenie przeszkadza, są dwie drogi bez niego:
 ekran konfiguracji. Wszystko wpisuje się **dotykiem, na panelu** — nie ma konsoli
 szeregowej, serwera HTTP ani aplikacji towarzyszącej.
 
-Wejścia na ekran konfiguracji są dwa: plakietka „skonfiguruj urządzenie" w nagłówku
-(na nieskonfigurowanym urządzeniu odświeżenie i tak nie ma czego pobrać) oraz numer
-wersji w lewym dolnym rogu — dyskretny, ale z obszarem dotykowym wysokim na 44 px.
+Na urządzeniu bez konfiguracji na środku ekranu stoi przycisk **Skonfiguruj** —
+420 × 96 px, czyli grubo ponad centymetr wysokości. Poza nim wejścia są jeszcze dwa:
+plakietka „skonfiguruj urządzenie" w nagłówku (na nieskonfigurowanym urządzeniu
+odświeżenie i tak nie ma czego pobrać) oraz numer wersji w lewym dolnym rogu —
+dyskretny, ale z obszarem dotykowym wysokim na 44 px, i to on jest drogą powrotu
+na urządzeniu **już** skonfigurowanym.
+
+**Dotknięcie odpowiada od razu.** Trafiony obszar zaczernia się i idzie na panel
+jako **częściowe** odświeżenie (`epd_hl_update_area`, MODE_DU) — ułamek klatki,
+zanim jeszcze zacznie się cokolwiek dziać pod przyciskiem. To jest oddzielone od
+wykonania akcji celowo: akcja bywa droga (pełne odświeżenie, wejście w konfigurację)
+albo w ogóle niewidoczna (`odśwież` tylko odkłada życzenie na następne wybudzenie),
+a na e-papierze brak odpowiedzi jest nieodróżnialny od zepsutego dotyku.
 
 **Panel reaguje na dotyk tylko wtedy, gdy urządzenie nie śpi**, a śpi prawie zawsze.
-Po narysowaniu ekranu otwiera się okno interaktywne — 20 s, przedłużane każdym
-dotknięciem, 90 s na ekranie konfiguracji. Okno kosztuje ~40 mA przez cały swój
+Okno interaktywne — 20 s, przedłużane każdym dotknięciem, 90 s na ekranie
+konfiguracji — **nie zależy od tego, czy akurat rysujemy klatkę**: zależność idzie
+w drugą stronę, to dotknięcie powoduje przerysowanie. Mapa obszarów dotykowych jest
+produktem ubocznym renderowania, a renderowanie to czysty CPU (ułamek milisekundy),
+więc okno otwiera się także wtedy, gdy treść się nie zmieniła i panel zostaje
+nietknięty. Okno kosztuje ~40 mA przez cały swój
 czas, więc na baterii otwiera się wyłącznie wtedy, gdy coś wskazuje na obecność
 człowieka: naciśnięty **BOOT** (jedyny przycisk na tej płytce zdolny wybudzić
 z deep sleepu), wpięty kabel USB albo urządzenie bez konfiguracji przy zimnym
@@ -328,9 +342,14 @@ i opisuje **to samo** przyklejenie płótna do szkła — pilnuje tego test
 dotyk chybiający o obrót, czyli objaw wyglądający na błąd sterownika GT911, a nie
 układu graficznego.
 
-To, czy sam GT911 raportuje w tym samym układzie, w którym panel skanuje, jest
-**założeniem, nie pomiarem**. Jeśli po pierwszym uruchomieniu dotyk trafia w lustro
-albo w zamienione osie, poprawka należy do `board/gt911.rs`, nie do układu.
+To, czy sam GT911 raportuje w tym samym układzie, w którym panel skanuje, **nie jest
+już zgadywane**: sterownik czyta rozdzielczość z jego rejestrów konfiguracji
+(`0x8146`/`0x8148`) i sam decyduje o obrocie. `960×540` to układ panelu i przelot
+bez zmian; `540×960` znaczy, że kontroler jest zamontowany o 90°, i wtedy liczymy
+`x = raw_y`, `y = 539 - raw_x` — tak samo jak crate `lilygo-t5s3paperpro` dla tej
+samej płytki. Ta sama binarka obsługuje oba warianty. Zostają lustra, których
+z rozdzielczości wyprowadzić się nie da; te rozstrzyga dotknięcie rogu i dwie stałe
+w `board/gt911.rs`.
 
 **epdiy jako komponent, nie własny sterownik.** `epdiy` 2.1.3 zawiera profil
 `lilygo_board_s3`, którego pinout zgadza się ze schematem co do nogi
@@ -386,8 +405,8 @@ opublikowanego obrazu. Przejście na OAuth to dodanie drugiej implementacji trai
 | Boot i render na panelu | **uruchomione** — płytka wstaje, rysuje ekran konfiguracji |
 | Czyszczenie panelu, zatrzaski magistrali | **poprawione i sprawdzone na szkle** — obraz czysty po wybudzeniu |
 | Dwie orientacje | **napisane**, pion sprawdzony na szkle, poziom nie |
-| Ekran konfiguracji i klawiatura | **zweryfikowane na hoście** — 78 testów, mysz w symulatorze; na szkle nie |
-| Sterownik dotyku GT911 | **napisany, nieuruchomiony** — sekwencja resetu i odczyt punktu; orientacja osi to założenie |
+| Ekran konfiguracji i klawiatura | **zweryfikowane na hoście** — 81 testów, mysz w symulatorze; na szkle nie |
+| Sterownik dotyku GT911 | **napisany, nieuruchomiony** — sekwencja resetu i odczyt punktu; obrót osi brany z rejestrów kontrolera, lustra nadal do sprawdzenia na szkle |
 | Decyzja OTA i polityka zasilania | **zweryfikowane** — 27 testów w `devlogic`, chodzą na hoście |
 | I²C, zasilanie, sieć, dotyk | **nieuruchomione** |
 | OTA — transport | **napisany, nieuruchomiony** — włącza się konsolą, wersje z gita |
