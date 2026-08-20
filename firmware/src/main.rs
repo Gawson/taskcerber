@@ -177,20 +177,15 @@ fn run(mut state: RtcState) -> Result<u64> {
 
     // --- 5. Sieć ---------------------------------------------------------------
     //
-    // `Epd` powstaje TUTAJ, a nie dopiero w kroku 6, żeby dało się wypisywać postęp
-    // WPROST NA PANEL — patrz [`NetTrace`]. Kosztuje to ~780 KB w PSRAM trzymane
-    // przez czas TLS-a, co przy ośmiu megabajtach nie robi różnicy.
-    //
-    // Sama sekwencja wyłączania i tak dostaje go później w ręce, więc reguła
-    // „panel z podniesionymi szynami nie może wejść w deep sleep" zostaje spełniona.
-    let mut epd = Epd::new(&bus).context("nie mogę zainicjalizować panelu")?;
-
-    // epdiy właśnie przestawiło cały port 1 ekspandera na wyjścia — łącznie z bitem
-    // przycisku, którego samo nie używa. Bez tego odczyt przycisku zwraca „wciśnięty"
-    // bez końca. Szczegóły: `Pca9535::reclaim_button_input`.
-    if let Err(e) = hw.expander.reclaim_button_input() {
-        warn!("nie mogę odzyskać bitu przycisku na ekspanderze: {e:#}");
-    }
+    // `Epd` powstaje tu TYLKO wtedy, gdy ślad na panelu jest włączony — bo tylko
+    // wtedy jest do czego rysować. Domyślnie nie powstaje i to jest istotne:
+    // epdiy trzymane przez czas TLS-a wywraca budżet wewnętrznego DRAM-u.
+    // Pełne wyjaśnienie przy [`NET_TRACE_ON_PANEL`].
+    let mut epd_early = if NET_TRACE_ON_PANEL {
+        Some(Epd::new(&bus).context("nie mogę zainicjalizować panelu")?)
+    } else {
+        None
+    };
 
     let requested = std::mem::take(&mut state.fetch_requested);
     if requested {
@@ -230,7 +225,7 @@ fn run(mut state: RtcState) -> Result<u64> {
     // zawiodła, powtarzanie życzenia sprzed godziny nie jest już tym, o co ktoś prosił.
     } else if requested || (policy.should_fetch(mode) && !matches!(mode, Mode::Night)) {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
-        let mut trace = (NET_TRACE_ON_PANEL && power_status.usb_present)
+        let mut trace = (epd_early.is_some() && power_status.usb_present)
             .then(|| NetTrace::begin(rotation, temperature));
         match fetch_everything(
             peripherals.modem,
@@ -243,8 +238,7 @@ fn run(mut state: RtcState) -> Result<u64> {
             home_tz,
             now,
             power::may_update(&policy, mode, fuel),
-            &mut epd,
-            trace.as_mut(),
+            epd_early.as_mut().zip(trace.as_mut()),
         ) {
             Ok(out) => {
                 // Restart natychmiast: radio jest już wyłączone, a szyny panelu są
@@ -293,6 +287,24 @@ fn run(mut state: RtcState) -> Result<u64> {
 
     // --- 6. Render i wypchnięcie na panel --------------------------------------
     // Radio jest już wyłączone — patrz komentarz na górze pliku.
+    //
+    // `Epd` powstaje TUTAJ, nie wcześniej, i to nie jest kwestia porządku. epdiy
+    // alokuje część swoich buforów w WEWNĘTRZNYM DRAM-ie, a ten jest ciasny i dzieli
+    // go z mbedTLS — dlatego `Epd::new` używa `EPD_LUT_1K` zamiast 64K, żeby zostawić
+    // 63 KB handshake'owi. Trzymanie epdiy przy życiu przez czas TLS-a wywraca ten
+    // budżet: na sprzęcie objawiło się to resetem przy `pobieram kalendarz główny`,
+    // czyli dokładnie w szczycie zapotrzebowania na pamięć.
+    let mut epd = match epd_early.take() {
+        Some(epd) => epd,
+        None => Epd::new(&bus).context("nie mogę zainicjalizować panelu")?,
+    };
+
+    // epdiy właśnie przestawiło cały port 1 ekspandera na wyjścia — łącznie z bitem
+    // przycisku, którego samo nie używa. Bez tego odczyt przycisku zwraca „wciśnięty"
+    // bez końca. Szczegóły: `Pca9535::reclaim_button_input`.
+    if let Err(e) = hw.expander.reclaim_button_input() {
+        warn!("nie mogę odzyskać bitu przycisku na ekspanderze: {e:#}");
+    }
     //
     // Porównujemy z CRC sprzed pobrania, nie z polem stanu — patrz `painted_crc`.
     // Przeciw `state.last_content_crc` warunek był tożsamościowo fałszywy po każdym
@@ -565,26 +577,26 @@ fn fetch_everything(
     home_tz: chrono_tz::Tz,
     now: NaiveDateTime,
     ota_allowed: bool,
-    epd: &mut Epd,
-    trace: Option<&mut NetTrace>,
+    // Panel i ślad — obecne tylko przy włączonym `NET_TRACE_ON_PANEL`.
+    slad: Option<(&mut Epd, &mut NetTrace)>,
 ) -> Result<Fetched> {
     let ssid = config.ssid.as_deref().unwrap_or_default();
     let password = config.password.as_deref().unwrap_or_default();
 
-    let mut trace = trace;
+    let mut slad = slad;
     // Jeden zapis kroku: do logu zawsze, na panel gdy ślad jest włączony.
     macro_rules! krok {
         ($co:expr) => {
-            match trace.as_deref_mut() {
-                Some(t) => t.step(epd, $co),
+            match slad.as_mut() {
+                Some((epd, t)) => t.step(epd, $co),
                 None => info!("krok5: {}", $co),
             }
         };
     }
 
-    krok!("podnoszę radio");
+    krok!(&format!("podnoszę radio · DRAM {} KB", wolny_dram_kb()));
     let wifi = net::wifi::Wifi::connect(modem, sysloop, nvs, ssid, password, state)?;
-    krok!("radio gotowe");
+    krok!(&format!("radio gotowe · DRAM {} KB", wolny_dram_kb()));
     if let Some(rssi) = wifi.rssi() {
         info!("RSSI: {rssi} dBm");
     }
@@ -625,7 +637,7 @@ fn fetch_everything(
     let mut any_ok = false;
     let mut last_error = None;
     for src in &sources {
-        krok!(&format!("pobieram: {}", src.name()));
+        krok!(&format!("pobieram {} · DRAM {} KB", src.name(), wolny_dram_kb()));
         match src.fetch(from, to) {
             Ok(result) => {
                 crc ^= result.content_crc;
@@ -643,7 +655,7 @@ fn fetch_everything(
     //
     // Po kalendarzu, bo kalendarz jest funkcją urządzenia, a aktualizacja tylko
     // utrzymaniem: nieudane albo długie OTA nie ma prawa zabrać ekranowi treści.
-    krok!("kalendarze pobrane");
+    krok!(&format!("pobrane · DRAM {} KB", wolny_dram_kb()));
     let mut ota_installed = false;
     if ota_allowed {
         match config.ota_url.as_deref() {
@@ -852,10 +864,25 @@ const RADIO_ONLY_ON_USB: bool = true;
 
 /// Czy wypisywać postęp kroku sieciowego wprost na panel.
 ///
-/// Rzecz na czas bring-upu i jedyne narzędzie, które działa bez kabla i bez
-/// przeglądarki. Pełne uzasadnienie przy [`NetTrace`] — łącznie z tym, dlaczego
-/// włącza się WYŁĄCZNIE przy obecnym USB.
-const NET_TRACE_ON_PANEL: bool = true;
+/// # Domyślnie WYŁĄCZONE, i to nie z ostrożności
+///
+/// Żeby rysować w trakcie kroku sieciowego, `Epd` musi istnieć — a epdiy alokuje
+/// część buforów w **wewnętrznym DRAM-ie**, tym samym, który jest potrzebny
+/// mbedTLS-owi na handshake. Cały projekt jest zbudowany tak, żeby te dwie rzeczy
+/// nigdy nie istniały jednocześnie: `Epd::new` bierze `EPD_LUT_1K` zamiast 64K
+/// właśnie po to, żeby zostawić 63 KB buforom TLS-a, a `Epd` powstaje dopiero
+/// w kroku 6, po wyłączeniu radia.
+///
+/// Włączenie tej stałej przenosi `Epd::new` przed krok sieciowy i ten budżet
+/// wywraca. Na sprzęcie objawiło się to **resetem przy `pobieram kalendarz główny`**,
+/// czyli dokładnie w szczycie zapotrzebowania na pamięć — po tym, jak WiFi i SNTP
+/// przechodziły bez problemu.
+///
+/// Ślad zrobił swoje: pokazał, gdzie kończy się krok sieciowy. Zostaje w kodzie,
+/// bo jest jedynym narzędziem działającym bez kabla i bez przeglądarki, ale włączać
+/// go wolno **wyłącznie ze świadomością, że sam może być przyczyną awarii**, której
+/// się szuka. Przy `false` te same kroki idą do logu.
+const NET_TRACE_ON_PANEL: bool = false;
 
 /// Czy urządzenie ma zostawiać kontroler dotyku przy życiu na czas snu, żeby
 /// dotknięcie mogło je obudzić.
@@ -1867,6 +1894,20 @@ impl Button {
         }
         false
     }
+}
+
+/// Wolny WEWNĘTRZNY DRAM w kilobajtach.
+///
+/// To jest zasób, o który biją się epdiy i mbedTLS, i jedyny, którego na tej płytce
+/// realnie brakuje — PSRAM-u jest osiem megabajtów. Handshake TLS do Google
+/// z pełnym pakietem certyfikatów to szczyt zapotrzebowania w całym cyklu, więc
+/// liczba tuż przed nim mówi, ile marginesu naprawdę zostało.
+fn wolny_dram_kb() -> u32 {
+    // SAFETY: prosty getter z ESP-IDF, bez stanu.
+    let bytes = unsafe {
+        esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL)
+    };
+    (bytes / 1024) as u32
 }
 
 /// Ile milisekund minęło od startu układu — pomiar 5 z `docs/bringup.md`.
