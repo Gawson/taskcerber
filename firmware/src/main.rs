@@ -312,7 +312,7 @@ fn run(mut state: RtcState) -> Result<u64> {
         let model = if config.is_provisioned() {
             build_model(now, events, fuel, power_status.usb_present, net_state)
         } else {
-            provisioning_model(now)
+            provisioning_model(now, fuel, power_status.usb_present)
         };
 
         // Pierwsze rysowanie w tym wybudzeniu MUSI być pełne — `back_fb` epdiy
@@ -633,9 +633,22 @@ fn present(
 ///
 /// Pokazywany, dopóki w NVS nie ma danych WiFi i adresu kalendarza — czyli zaraz
 /// po wgraniu firmware'u z przeglądarki.
-fn provisioning_model(now: NaiveDateTime) -> Model {
+fn provisioning_model(now: NaiveDateTime, fuel: board::bq27220::Fuel, charging: bool) -> Model {
     let mut model = Model::empty(now);
     model.firmware = format!("t5s3pro {VERSION}");
+    // Stan ogniwa MUSI tu być, choć ekran jest „pusty". Wcześniej go nie było i przez
+    // to wskaźnik baterii nie wskazywał niczego przez cały bring-up: `Model::empty`
+    // daje `percent: None`, więc rysowała się sama ramka. Dane z licznika są w tym
+    // momencie odczytane i leżą u wołającego — po prostu nie trafiały do modelu.
+    //
+    // Na tym ekranie ta informacja jest POTRZEBNIEJSZA niż na agendzie: urządzenie
+    // jeszcze nie umie się nic pobrać, więc jedyne, co da się z niego wyczytać, to
+    // czy żyje i czy się ładuje.
+    model.battery = Battery {
+        percent: fuel.percent,
+        millivolts: fuel.millivolts,
+        charging,
+    };
     model.net = NetState::NeedsAuth;
     model.tiles = vec![
         dashboard::model::Tile::new("krok 1", "Skonfiguruj"),
