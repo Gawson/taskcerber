@@ -138,15 +138,26 @@ impl Page {
     /// dosunięta do dolnej krawędzi, więc rośnie w górę.
     pub fn rows(self) -> &'static [&'static str] {
         match self {
-            // Kropka, przecinek i ukośnik SĄ na stronie liter, choć powtarzają się
-            // na symbolach. Adres iCal to głównie one, a odsyłanie po każdy znak
-            // interpunkcyjny na drugą stronę zamienia wpisywanie adresu w mordęgę.
-            // Miejsce było: dolny wiersz miał siedem klawiszy przy dziesięciu w górnym.
-            Page::Letters => &["qwertyuiop", "asdfghjkl", "zxcvbnm.,/"],
-            // Wiersz drugi to komplet znaków z adresu iCal Google; trzeci to reszta
+            // CZTERY wiersze, tak jak strona symboli — klawiatura jest dosunięta do
+            // dolnej krawędzi i rośnie w górę, więc miejsce na to jest.
+            //
+            // Wiersz cyfr na górze, jak w każdym telefonie. Cyfry są w haszu każdego
+            // adresu iCal, w większości SSID-ów i w prawie każdym haśle; odsyłanie po
+            // nie na drugą stronę było największym pojedynczym kosztem wpisywania.
+            // Ze strony symboli znikają, więc nie ma tu duplikatu.
+            //
+            // Cztery wolne miejsca w dwóch dolnych wierszach dostają znaki, których
+            // adres wymaga najczęściej. `@` sąsiaduje z `.` i `/` celowo — w adresie
+            // chodzi się po nich trójkami.
+            Page::Letters => &["1234567890", "qwertyuiop", "asdfghjkl@", "zxcvbnm.,/"],
+            // Wiersz pierwszy to komplet znaków z adresu iCal Google; drugi to reszta
             // tego, co trafia do haseł. Polskie znaki są na osobnym wierszu, bo
             // w SSID-ach się zdarzają, a bez nich nie byłoby ich jak wpisać w ogóle.
-            Page::Symbols => &["1234567890", "./:-_?=&%@", "+#!*$,;'\"", "ąćęłńóśźż"],
+            //
+            // `.`, `,`, `/` i `@` powtarzają się tu ze stroną liter i to jest CELOWE:
+            // gdy ktoś jest już na symbolach i składa adres, odsyłanie go z powrotem
+            // po kropkę byłoby tym samym błędem w drugą stronę.
+            Page::Symbols => &["./:-_?=&%@", "+#!*$,;'\"", "ąćęłńóśźż"],
         }
     }
 
@@ -491,7 +502,7 @@ mod tests {
     ///
     /// Dlatego wyjątek jest JAWNY, a nie przez usunięcie testu: przypadkowy duplikat
     /// nadal wywala build, świadomy trzeba dopisać tutaj razem z powodem.
-    const DOZWOLONE_DUPLIKATY: &[char] = &['.', ',', '/'];
+    const DOZWOLONE_DUPLIKATY: &[char] = &['.', ',', '/', '@'];
 
     #[test]
     fn znaki_powtarzaja_sie_tylko_tam_gdzie_wolno() {
