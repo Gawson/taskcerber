@@ -30,6 +30,8 @@ use dashboard::{render, render_setup, Action, Fonts, Gray8, Model, Rotation, Set
 enum Scene {
     /// Karta tonów — nie ma modelu, rysuje się sama.
     TestCard,
+    /// Widok miesięczny.
+    Month(Box<Model>),
     /// Karta jednorodności tła.
     Uniformity,
     Dash(Box<Model>),
@@ -90,6 +92,7 @@ fn main() {
                 Scene::Config(Box::new(scenario_setup_adres())),
             ),
         ],
+        "miesiac" | "month" => vec![("miesiac", Scene::Month(Box::new(scenario_miesiac())))],
         "tony" | "testcard" => vec![("tony", Scene::TestCard)],
         "jednorodnosc" | "uniformity" => vec![("jednorodnosc", Scene::Uniformity)],
         "detail" => vec![("detail", {
@@ -112,6 +115,7 @@ fn main() {
                 dashboard::render_test_card(&fonts, &mut canvas);
                 0
             }
+            Scene::Month(model) => dashboard::render_month(model, &fonts, &mut canvas).hits.len(),
             Scene::Uniformity => {
                 dashboard::render_uniformity_card(&fonts, &mut canvas);
                 0
@@ -306,6 +310,37 @@ fn scenario_offline() -> Model {
         millivolts: Some(3520),
         charging: false,
     };
+    m
+}
+
+/// Miesiąc z NIERÓWNĄ gęstością — to jest realny przypadek, nie „każdy dzień
+/// wygląda tak samo". Zakres pobranych dni celowo kończy się przed końcem miesiąca,
+/// żeby było widać różnicę między „nic nie ma" a „nie wiem".
+fn scenario_miesiac() -> Model {
+    let mut m = base(dt(18, 7, 15));
+    let gestosc: [(u32, usize); 12] = [
+        (10, 1),
+        (11, 2),
+        (12, 5),
+        (14, 1),
+        (17, 3),
+        (18, 4),
+        (19, 2),
+        (20, 1),
+        (21, 7),
+        (24, 2),
+        (25, 1),
+        (26, 3),
+    ];
+    m.days = gestosc
+        .iter()
+        .map(|&(d, ile)| DayGroup {
+            date: date(d),
+            events: (0..ile)
+                .map(|i| ev(d, 8 + i as u32, 0, 9 + i as u32, 0, "Spotkanie"))
+                .collect(),
+        })
+        .collect();
     m
 }
 

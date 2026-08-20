@@ -123,23 +123,23 @@ impl Geom {
 // „w kompakcie jeden stopień niżej". Pozostałe warunki zniknęły.
 
 /// Numer dnia. Jedyny element czytelny z drugiego końca pokoju.
-const TEXT_HERO: f32 = 76.0;
+pub(crate) const TEXT_HERO: f32 = 76.0;
 
 /// To, po co się na ten ekran patrzy: tytuł w szczegółach, stan pusty, wpisywana
 /// wartość w pionie.
-const TEXT_TITLE: f32 = 44.0;
+pub(crate) const TEXT_TITLE: f32 = 44.0;
 
 /// Nagłówek ekranu i przycisk główny: dzień tygodnia, „Konfiguracja", „Skonfiguruj",
 /// klawisze znakowe.
-const TEXT_HEAD: f32 = 34.0;
+pub(crate) const TEXT_HEAD: f32 = 34.0;
 
 /// Treść pierwszoplanowa: tytuł wydarzenia, godzina startu, nagłówek dnia,
 /// etykieta pola.
-const TEXT_LEAD: f32 = 27.0;
+pub(crate) const TEXT_LEAD: f32 = 27.0;
 
 /// Drugi plan, czytany z ręki: lokalizacja, jednostka, zakładki, podpowiedź,
 /// lista „zapamiętane", plakietki, pasek klawiatury.
-const TEXT_BODY: f32 = 22.0;
+pub(crate) const TEXT_BODY: f32 = 22.0;
 
 /// **Nie jest stopniem projektowym**, tylko podłogą reguły 1.
 ///
@@ -148,7 +148,7 @@ const TEXT_BODY: f32 = 22.0;
 /// w rogu i nagłówek listy „zapamiętane" — ten drugi ma w pionie **1 px** zapasu
 /// (`HEAD_H` 24 + 6 × 28 = 192 przy 193 dostępnych), więc wyższy nagłówek to
 /// zniknięcie całej listy.
-const TEXT_FLOOR: f32 = 19.0;
+pub(crate) const TEXT_FLOOR: f32 = 19.0;
 
 const STATUS_SIZE: f32 = TEXT_BODY;
 const STATUS_PAD: i32 = 10;

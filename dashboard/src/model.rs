@@ -194,6 +194,30 @@ pub fn dzien_skrot(d: NaiveDate) -> &'static str {
 pub fn miesiac_dopelniacz(d: NaiveDate) -> &'static str {
     MIESIACE_DOPELNIACZ[(d.month0()) as usize]
 }
+/// Nazwa miesiąca w MIANOWNIKU — „sierpień", nie „sierpnia".
+///
+/// Dopełniacz jest formą do daty („18 sierpnia"), a nagłówek widoku miesięcznego
+/// nazywa sam miesiąc i wymaga mianownika. Dwie osobne funkcje, bo polski nie
+/// pozwala tu na jedną.
+pub fn miesiac_mianownik(d: NaiveDate) -> &'static str {
+    const M: [&str; 12] = [
+        "styczeń",
+        "luty",
+        "marzec",
+        "kwiecień",
+        "maj",
+        "czerwiec",
+        "lipiec",
+        "sierpień",
+        "wrzesień",
+        "październik",
+        "listopad",
+        "grudzień",
+    ];
+    M[(d.month() as usize - 1).min(11)]
+}
+
+
 
 /// „18 sierpnia"
 pub fn data_dzien_miesiac(d: NaiveDate) -> String {
