@@ -109,6 +109,24 @@ const STATUS_BASELINE: f32 = 90.0;
 const TILE_VALUE_SIZE: f32 = 32.0;
 const TILE_VALUE_MIN_SIZE: f32 = 22.0;
 
+/// Jednostka przy wartości kafelka („°C", „%").
+///
+/// Sztywna, bo skalowanie od rozmiaru wartości (`size * 0.62`) łamało reguły
+/// typografii z nagłówka tego pliku. Przy pełnej wartości dawało 19,8 px **Regular**
+/// — reguła 2 (poniżej 26 px nigdy Regular) łamana na KAŻDYM kafelku z jednostką.
+/// Gdy wartość zwężała się do [`TILE_VALUE_MIN_SIZE`], schodziło do 13,6 px, czyli
+/// dodatkowo reguła 1. Podłoga `.max(12.0)` była martwa: 22 × 0,62 = 13,64 > 12.
+///
+/// Zmierzone przez realny potok (`quantize_ink` + `simulate_panel`): 20 px Medium
+/// daje o 13-17% więcej widocznego atramentu niż 19,8 px Regular, a szerokość „°C"
+/// rośnie o 0,02 px. Zysk jest darmowy, bo miejsce i tak było zarezerwowane.
+///
+/// **Rezerwacja miejsca niżej MUSI liczyć tymi samymi stałymi.** Gdy liczyła
+/// `20.0, Regular`, a rysunek szedł Medium, najszersza jednostka („jednostek"
+/// ze scenariusza stresowego) wychodziła 1,6 px poza kolumnę kafelka.
+const TILE_UNIT_SIZE: f32 = 20.0;
+const TILE_UNIT_WEIGHT: Weight = Weight::Medium;
+
 const DAY_HEADER_H: i32 = 40;
 const EVENT_H: i32 = 50;
 const EVENT_H_WITH_LOCATION: i32 = 62;
@@ -137,8 +155,14 @@ pub fn render(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     // dokładnie tak, jak to zgłoszono ze sprzętu. Po kwantyzacji czytelne jest 100%
     // atramentu, a jego ilość spada tylko o 2%, bo próg `BILEVEL_THRESHOLD` jest
     // przesunięty w stronę czerni i większość obwódki zostaje czernią zamiast zniknąć.
-    // W praktyce kreska raczej tyje, niż chudnie.
-    c.quantize2();
+    // Ale samo progowanie do dwóch poziomów zabiera krawędziom gładkość, a przy
+    // małych rozmiarach to ONA nadaje literze kształt — też zgłoszone ze sprzętu.
+    // Dlatego nie dwa poziomy, tylko PIĘĆ: tyle, ile panel realnie ma na atrament.
+    // Pełne wyjaśnienie przy [`Gray8::quantize_ink`].
+    //
+    // Agenda może sobie na to pozwolić, bo jest odświeżana przez GC16. Klawiatura nie
+    // może i zostaje przy `quantize2`, bo każde naciśnięcie klawisza idzie przez DU.
+    c.quantize_ink();
 
     screen
 }
@@ -501,12 +525,12 @@ fn draw_day_header(
         g.margin as f32 + label_w + 14.0,
         baseline,
         22.0,
-        Weight::Regular,
-        INK_DIM,
+        Weight::Medium,
+        BLACK,
         Align::Left,
     );
 
-    let sub_w = fonts.measure(&sub, 22.0, Weight::Regular);
+    let sub_w = fonts.measure(&sub, 22.0, Weight::Medium);
     let line_x = g.margin + (label_w + sub_w) as i32 + 30;
     let line_w = g.w - g.margin - line_x;
     if line_w > 20 {
@@ -1002,7 +1026,7 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
         let unit_w = tile
             .unit
             .as_ref()
-            .map_or(0.0, |u| fonts.measure(u, 20.0, Weight::Regular) + 6.0);
+            .map_or(0.0, |u| fonts.measure(u, TILE_UNIT_SIZE, TILE_UNIT_WEIGHT) + 6.0);
         let room = (tw as f32 - unit_w).max(1.0);
 
         let mut size = TILE_VALUE_SIZE;
@@ -1028,8 +1052,8 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
                 unit,
                 x as f32 + value_w + 6.0,
                 (top + 64) as f32,
-                (size * 0.62).max(12.0),
-                Weight::Regular,
+                TILE_UNIT_SIZE,
+                TILE_UNIT_WEIGHT,
                 INK_DIM,
                 Align::Left,
             );
@@ -1223,7 +1247,7 @@ fn draw_setup_head(
 
     // Po prawej stronie tytułu: czego jeszcze brakuje. To jedyne miejsce, w którym
     // widać postęp — zakładek jest sześć i cztery z nich są opcjonalne.
-    let status_size = if g.compact { 18.0 } else { 20.0 };
+    let status_size = if g.compact { 20.0 } else { 22.0 };
     let (status, ink) = match setup.first_missing() {
         Some(field) => (format!("brakuje: {}", field.tab()), BLACK),
         None => ("komplet — naciśnij zapisz".to_string(), INK_DIM),
@@ -1234,7 +1258,7 @@ fn draw_setup_head(
         (g.w - m) as f32,
         g.title_base,
         status_size,
-        Weight::Regular,
+        Weight::Medium,
         ink,
         Align::Right,
     );

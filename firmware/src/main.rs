@@ -992,7 +992,7 @@ fn interactive_loop(
                     state,
                     temperature_c,
                     rotation,
-                    Refresh::Fast,
+                    Refresh::Full,
                     &mut panel_synced,
                 );
                 repainted = true;
@@ -1005,7 +1005,7 @@ fn interactive_loop(
                     state,
                     temperature_c,
                     rotation,
-                    Refresh::Fast,
+                    Refresh::Full,
                     &mut panel_synced,
                 );
                 repainted = true;
@@ -1018,7 +1018,7 @@ fn interactive_loop(
                     state,
                     temperature_c,
                     rotation,
-                    Refresh::Fast,
+                    Refresh::Full,
                     &mut panel_synced,
                 );
                 repainted = true;
@@ -1031,7 +1031,7 @@ fn interactive_loop(
                         state,
                         temperature_c,
                         rotation,
-                        Refresh::Fast,
+                        Refresh::Full,
                         &mut panel_synced,
                     );
                     repainted = true;
@@ -1126,6 +1126,8 @@ fn setup_screen(
     let mut last_input = Instant::now();
     // Prostokąty tknięte od ostatniego wypchnięcia — klawisze, które zmieniły stan.
     let mut touched: Vec<dashboard::Rect> = Vec::new();
+    // Ile odświeżeń DU poszło od ostatniego pełnego — patrz czyszczenie duchów niżej.
+    let mut du_since_full = 0u8;
 
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(SAMPLE_MS));
@@ -1206,6 +1208,42 @@ fn setup_screen(
 
         // --- 3. Czy już wypychać ---------------------------------------------
         let Some(since) = pending_since else {
+            // Duchy po DU: przebieg dwupoziomowy nie resetuje cząstek do końca, więc
+            // piksel przepędzony czerń→biel zostaje ciemniejszy od takiego, którego
+            // nikt nie ruszał. Na klawiaturze widać to wprost — naciśnięty i zwolniony
+            // klawisz zostaje szarawy, a kursor zostawia ślad na każdej pozycji,
+            // z której zniknął.
+            //
+            // Jedynym lekarstwem jest pełne odświeżenie i wcześniej nie było na nie
+            // stać: kosztowało ~1,5 s i wchodziło w słowo. Po przejściu na odniesienie
+            // z negatywu treści kosztuje ~250 ms, czyli tyle co siedem klatek DU —
+            // a odłożone do przerwy w pisaniu nie wchodzi w drogę nikomu.
+            if du_since_full >= DU_BEFORE_FULL
+                && last_input.elapsed() >= Duration::from_millis(FULL_AFTER_IDLE_MS)
+            {
+                du_since_full = 0;
+                let started = Instant::now();
+                // Negatyw ostatniego klawisza gaśnie przy okazji — to jedyne miejsce
+                // poza następnym naciśnięciem, które go sprząta.
+                want_pressed = None;
+                let (fresh, fresh_screen) = repaint_setup(
+                    epd,
+                    &setup,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Full,
+                    None,
+                );
+                canvas = fresh;
+                screen = fresh_screen;
+                touched.clear();
+                info!(
+                    "czyszczenie duchów w przerwie: {} ms",
+                    started.elapsed().as_millis()
+                );
+                continue;
+            }
             if last_input.elapsed() >= Duration::from_millis(POWER_HOLD_IDLE_MS) {
                 epd.hold_power(false);
             }
@@ -1280,6 +1318,7 @@ fn setup_screen(
             );
         }
 
+        du_since_full = du_since_full.saturating_add(1);
         touched.clear();
         pending_since = None;
     }
@@ -1508,6 +1547,20 @@ fn mark_going_to_sleep(epd: &mut Epd, canvas: &mut Gray8, rotation: Rotation, te
         warn!("nie mogę narysować znacznika snu: {e:#}");
     }
 }
+
+/// Ile odświeżeń DU wolno nazbierać, zanim w najbliższej przerwie posprzątamy duchy.
+///
+/// Duch po DU narasta z każdym przebiegiem, więc próg jest kompromisem między
+/// czystością a liczbą przerw. Dwanaście to mniej więcej jedno słowo.
+const DU_BEFORE_FULL: u8 = 12;
+
+/// Jak długa musi być przerwa w pisaniu, żeby wtrącić pełne odświeżenie.
+///
+/// Dwie sekundy to znacznie więcej niż odstęp między znakami, a wyraźnie mniej niż
+/// czas potrzebny na znalezienie kolejnego pola. Wcześniej próg wynosił 1,2 s przy
+/// odświeżeniu za 1,5 s i to i tak wchodziło w słowo — teraz odświeżenie trwa
+/// ~250 ms, więc nawet trafione w niewłaściwy moment nie jest dotkliwe.
+const FULL_AFTER_IDLE_MS: u64 = 2_000;
 
 /// Po jakiej bezczynności opuszczamy szyny panelu w czasie pisania.
 ///

@@ -213,6 +213,28 @@ const PANEL_RESPONSE: [u8; 16] = [
     0x18, 0x28, 0x40, 0x58, 0x70, 0x88, 0x9C, 0xB0, 0xC4, 0xD8, 0xEE, 0xF4, 0xF8, 0xFB, 0xFD, 0xFF,
 ];
 
+/// Pokrycie, poniżej którego piksel idzie na biel.
+///
+/// 38/255 to ~15%. Niżej i tak nie ma czym tego pokazać — najjaśniejszy użyteczny
+/// poziom atramentu to 4, a między nim a bielą panel nie ma nic.
+pub const INK_CUTOFF: u8 = 38;
+
+/// Odwzorowuje wartość płótna na jeden z pięciu poziomów atramentu albo na biel.
+///
+/// Patrz [`Gray8::quantize_ink`].
+pub fn ink_level(v: u8) -> u8 {
+    let coverage = 255u16 - v as u16;
+    if coverage < INK_CUTOFF as u16 {
+        return WHITE;
+    }
+    // `t` rośnie od 0 przy progu do 1 przy pełnym pokryciu.
+    let span = 255u16 - INK_CUTOFF as u16;
+    let t = coverage - INK_CUTOFF as u16;
+    // Pięć stopni: pełne pokrycie -> 0 (czerń), próg -> 4.
+    let level = 4 - ((t * 4 + span / 2) / span).min(4);
+    (level as u8) * 0x11
+}
+
 /// Macierz Bayera 4×4, wartości 0-15.
 ///
 /// Rozkład uporządkowany: sąsiednie piksele dostają progi maksymalnie od siebie
@@ -522,6 +544,42 @@ impl Gray8 {
     pub fn simulate_panel(&mut self) {
         for p in self.px.iter_mut() {
             *p = PANEL_RESPONSE[(*p >> 4) as usize];
+        }
+    }
+
+    /// Ściska antyaliasing do poziomów, które panel NAPRAWDĘ pokazuje.
+    ///
+    /// # Trzecia droga między dwoma złymi
+    ///
+    /// Krawędzie liter powstają z pokrycia: `Fonts::draw` blenduje glif z tłem, więc
+    /// obwódka jest szara. Na tym panelu prowadziło to do wyboru między dwiema
+    /// wadami, obiema zgłoszonymi ze sprzętu:
+    ///
+    /// * **pełne 16 poziomów** — 31% atramentu ekranu lądowało powyżej poziomu 9,
+    ///   czyli w bieli. Litery wychodziły cienkie i wypłowiałe.
+    /// * **dwa poziomy** ([`Gray8::quantize2`]) — cały atrament widoczny, ale
+    ///   krawędzie twarde. Przy małych rozmiarach czytelność SPADA, bo znika
+    ///   wygładzenie, które nadaje kształt.
+    ///
+    /// Obie wady biorą się z tego samego błędu: rozkładania pokrycia na skalę, której
+    /// panel nie ma. Ten panel ma na atrament **pięć stopni: 0-4**. Antyaliasing
+    /// ściśnięty do tych pięciu jest jednocześnie widoczny w całości i gładki.
+    ///
+    /// # Jak to liczy
+    ///
+    /// Pokrycie poniżej [`INK_CUTOFF`] to szum — idzie na biel, bo i tak nie miałoby
+    /// czym się wyświetlić. Reszta rozkłada się liniowo na pięć poziomów: pełne
+    /// pokrycie daje czerń, ledwie przekroczony próg daje poziom 4.
+    ///
+    /// # Kiedy tego NIE używać
+    ///
+    /// Na ekranie odświeżanym przez `MODE_DU`. DU jest dwupoziomowy z definicji, więc
+    /// zetnie te pięć stopni z powrotem do dwóch — i to niespójnie z pełnym
+    /// odświeżeniem, które je pokaże. Klawiatura zostaje przy [`Gray8::quantize2`]
+    /// właśnie dlatego, że każde naciśnięcie klawisza idzie przez DU.
+    pub fn quantize_ink(&mut self) {
+        for p in self.px.iter_mut() {
+            *p = ink_level(*p);
         }
     }
 
