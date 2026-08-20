@@ -1428,10 +1428,12 @@ enum BringUpCard {
 
 /// Ile razy dodatkowo przepędzić panel czyszczeniem przed rysowaniem karty.
 ///
-/// Każdy przebieg to ~0,7 s i 96 przelotów przez wszystkie bramki. Służy do
-/// rozstrzygnięcia, czy pasy na tle są nieskasowaną historią (wtedy słabną),
-/// czy cechą szkła (wtedy nie drgną).
-const EXTRA_FULLCLEARS: u32 = 3;
+/// Każdy przebieg to ~0,7 s i 96 przelotów przez wszystkie bramki. Zero, bo pytanie
+/// „czy to historia" jest już rozstrzygnięte — jaśniejsze prostokąty leżą dokładnie
+/// tam, gdzie robiono odświeżenia częściowe, i są odrobinę większe od obiektów, bo
+/// `clamp_area` wyrównuje wypychany prostokąt do ośmiu pikseli. Lekarstwem jest
+/// `FINISH_FULL_WITH_DU` w `epd`, nie kolejne czyszczenia.
+const EXTRA_FULLCLEARS: u32 = 0;
 
 const BRING_UP_CARD: BringUpCard = BringUpCard::Uniformity;
 
@@ -1456,15 +1458,9 @@ fn show_bring_up_card(epd: &mut Epd, temperature_c: i32, rotation: Rotation) {
     let mut canvas = Gray8::new(rotation);
 
     // Czyszczenie PRZED narysowaniem czegokolwiek — inaczej mierzylibyśmy stan
-    // panelu po naszym własnym rysowaniu, a nie po samym czyszczeniu.
-    if EXTRA_FULLCLEARS > 0 {
-        let started = std::time::Instant::now();
-        epd.deep_clean(EXTRA_FULLCLEARS, temperature_c);
-        info!(
-            "dodatkowe czyszczenie x{EXTRA_FULLCLEARS}: {} ms",
-            started.elapsed().as_millis()
-        );
-    }
+    // panelu po naszym własnym rysowaniu, a nie po samym czyszczeniu. Przy zerze
+    // `deep_clean` wraca od razu.
+    epd.deep_clean(EXTRA_FULLCLEARS, temperature_c);
 
     let du_box = match BRING_UP_CARD {
         BringUpCard::Uniformity => dashboard::render_uniformity_card(&fonts, &mut canvas),

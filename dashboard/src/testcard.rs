@@ -453,3 +453,4 @@ pub fn render_uniformity_card(fonts: &Fonts, c: &mut Gray8) -> Rect {
 
     du
 }
+
