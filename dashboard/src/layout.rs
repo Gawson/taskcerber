@@ -863,19 +863,22 @@ pub fn render_saved(fonts: &Fonts, c: &mut Gray8) -> Screen {
 /// Pełne uzasadnienie przy `NetTrace` w firmwarze.
 pub fn draw_net_step(fonts: &Fonts, c: &mut Gray8, row: Rect, co: &str, ms: u128) {
     let g = Geom::of(c);
+    // `TEXT_HEAD`, nie `TEXT_BODY`: to jest ekran diagnostyczny czytany z dystansu,
+    // w dodatku nadpisany na tym, co zostało z poprzedniej klatki. Drugoplanowy
+    // rozmiar był tu nie do odczytania i tak to zgłoszono ze sprzętu.
     let czas = format!("{ms} ms");
-    let czas_w = fonts.measure(&czas, TEXT_BODY, Weight::Medium);
+    let czas_w = fonts.measure(&czas, TEXT_LEAD, Weight::Medium);
 
-    let dostepne = (g.w - 2 * g.margin) as f32 - czas_w - 12.0;
-    let co = fonts.truncate(co, dostepne, TEXT_BODY, Weight::Bold);
+    let dostepne = (g.w - 2 * g.margin) as f32 - czas_w - 14.0;
+    let co = fonts.truncate(co, dostepne, TEXT_HEAD, Weight::Bold);
 
-    let baseline = (row.y + 19) as f32;
+    let baseline = (row.y + 34) as f32;
     fonts.draw(
         c,
         &co,
         g.margin as f32,
         baseline,
-        TEXT_BODY,
+        TEXT_HEAD,
         Weight::Bold,
         BLACK,
         Align::Left,
@@ -885,7 +888,7 @@ pub fn draw_net_step(fonts: &Fonts, c: &mut Gray8, row: Rect, co: &str, ms: u128
         &czas,
         (g.w - g.margin) as f32,
         baseline,
-        TEXT_BODY,
+        TEXT_LEAD,
         Weight::Medium,
         BLACK,
         Align::Right,

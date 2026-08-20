@@ -467,42 +467,68 @@ struct NetTrace {
     temperature_c: i32,
     band: dashboard::Rect,
     line: i32,
+    cleared: bool,
     started: std::time::Instant,
 }
 
 impl NetTrace {
     /// Ile kroków mieści się w pasie, zanim zacznie się od góry.
-    const LINES: i32 = 10;
-    /// Wysokość jednego wiersza kroku.
-    const LINE_H: i32 = 26;
+    const LINES: i32 = 8;
+    /// Wysokość jednego wiersza. Dobrana pod `TEXT_HEAD`, bo to ma być czytelne
+    /// z drugiego końca biurka, a nie z nosem przy szkle.
+    const LINE_H: i32 = 46;
 
     fn begin(rotation: Rotation, temperature_c: i32) -> Self {
-        let fonts = Fonts::embedded();
         let canvas = Gray8::new(rotation);
         let w = canvas.width() as i32;
         let h = canvas.height() as i32;
         let band_h = Self::LINES * Self::LINE_H;
 
         Self {
+            fonts: Fonts::embedded(),
             canvas,
-            fonts,
             rotation,
             temperature_c,
             band: dashboard::Rect::new(0, (h - band_h) / 2, w, band_h),
             line: 0,
+            cleared: false,
             started: std::time::Instant::now(),
         }
     }
 
-    /// Dopisuje krok i wypycha SAM jego wiersz.
+    /// Czyści sam pas — raz, przy pierwszym kroku.
     ///
-    /// Bez czyszczenia i bez pełnego odświeżenia: kroki nadpisują to, co akurat jest
-    /// na szkle, i to jest świadoma cena. `back_fb` epdiy jest po wybudzeniu biały,
-    /// więc różnicą są wyłącznie czarne piksele napisu — reszta panelu nie dostaje
-    /// ani jednego impulsu. Jeden wiersz to jedno odświeżenie częściowe, pięć faz.
+    /// epdiy napędza wyłącznie piksele różne od `back_fb`, a ten po wybudzeniu jest
+    /// biały. Samo wypełnienie pasa bielą nie skasuje więc niczego: różnicy nie ma,
+    /// impulsu nie ma, stara treść zostaje. Trzeba przejść przez czerń.
+    ///
+    /// Kosztuje to dwa odświeżenia częściowe, czyli **dziesięć faz** — wobec
+    /// trzydziestu pięciu, które kosztowało pełne odświeżenie w pierwszej wersji.
+    /// I dotyczy wyłącznie pasa, nie całego ekranu. Tyle wolno wydać na to, żeby
+    /// ślad dało się przeczytać.
+    fn clear_band(&mut self, epd: &mut Epd) {
+        let area = self.rotation.canvas_rect_to_panel(self.band);
+
+        self.canvas.fill_rect(self.band, dashboard::canvas::BLACK);
+        if let Err(e) = epd.present_area(&self.canvas, area, self.temperature_c) {
+            warn!("nie mogę zaczernić pasa śladu: {e:#}");
+            return;
+        }
+        self.canvas.fill_rect(self.band, dashboard::canvas::WHITE);
+        if let Err(e) = epd.present_area(&self.canvas, area, self.temperature_c) {
+            warn!("nie mogę wyczyścić pasa śladu: {e:#}");
+        }
+    }
+
+    /// Dopisuje krok i wypycha SAM jego wiersz.
     fn step(&mut self, epd: &mut Epd, co: &str) {
         let ms = self.started.elapsed().as_millis();
         info!("krok5[{ms} ms]: {co}");
+
+        if !self.cleared {
+            self.cleared = true;
+            self.clear_band(epd);
+        }
 
         let y = self.band.y + (self.line % Self::LINES) * Self::LINE_H;
         let row = dashboard::Rect::new(self.band.x, y, self.band.w, Self::LINE_H);
