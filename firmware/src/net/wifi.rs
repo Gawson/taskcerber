@@ -23,6 +23,13 @@ use crate::power::rtc_state::RtcState;
 /// więc nie wolno jej przeciągać ani powtarzać w obrębie jednego wybudzenia.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Limit na zamknięcie radia.
+///
+/// Krótki, bo tu już nie ma czego ratować: jeśli sterownik nie potwierdzi
+/// rozłączenia, i tak zaraz idziemy spać, a deep sleep gasi radio twardo.
+/// Chodzi wyłącznie o to, żeby nie stać tu w nieskończoność.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub struct Wifi<'a> {
     inner: BlockingWifi<EspWifi<'a>>,
 }
@@ -63,7 +70,8 @@ impl<'a> Wifi<'a> {
                 Err(e) => {
                     warn!("zapamiętany AP nie odpowiedział ({e:#}), unieważniam bufor");
                     state.invalidate_ap();
-                    let _ = wifi.stop();
+                    // Z limitem:  z esp-idf-svc czeka bez końca.
+                    Self::stop_bounded(&mut wifi, CONNECT_TIMEOUT.saturating_sub(started.elapsed()));
                 }
             }
         }
@@ -127,7 +135,22 @@ impl<'a> Wifi<'a> {
 
         let deadline = Instant::now() + budget;
 
-        wifi.start().context("nie mogę wystartować WiFi")?;
+        // `BlockingWifi::start()` NIE MA LIMITU CZASU — w esp-idf-svc 0.52.1 woła
+        // `wifi_wait_while(..., None)`. Jeśli zdarzenie `STA_START` nigdy nie
+        // przyjdzie, blokuje się **na zawsze**: bez paniki, bez resetu, bez śladu.
+        // Dokładnie tak wyglądał objaw ze sprzętu — na kablu urządzenie stało
+        // w kroku sieciowym i nigdy nie dochodziło nawet do znacznika snu.
+        //
+        // To samo dotyczy `stop()` i `disconnect()`. Limit ma tylko `connect()`
+        // (15 s, zaszyte w esp-idf-svc). Dlatego wołamy nieblokujący sterownik
+        // i czekamy SAMI, z naszym budżetem.
+        wifi.wifi_mut()
+            .start()
+            .context("nie mogę wystartować WiFi")?;
+        wait_bounded(wifi, deadline, "start sterownika WiFi", |w| {
+            w.wifi().is_started().map(|s| !s)
+        })?;
+
         wifi.connect().context("asocjacja nie powiodła się")?;
 
         // `BlockingWifi::wait_netif_up` ma WŁASNY limit 15 s zaszyty w esp-idf-svc
@@ -149,6 +172,22 @@ impl<'a> Wifi<'a> {
         Ok(())
     }
 
+    /// Zatrzymuje sterownik z limitem czasu.
+    ///
+    /// `BlockingWifi::stop()` czeka bez limitu — patrz komentarz w [`Wifi::try_connect`].
+    fn stop_bounded(wifi: &mut BlockingWifi<EspWifi<'_>>, budget: Duration) {
+        if let Err(e) = wifi.wifi_mut().stop() {
+            warn!("zatrzymanie WiFi zwróciło błąd: {e:#}");
+            return;
+        }
+        let deadline = Instant::now() + budget;
+        if let Err(e) = wait_bounded(wifi, deadline, "zatrzymanie sterownika WiFi", |w| {
+            w.wifi().is_started()
+        }) {
+            warn!("{e:#}");
+        }
+    }
+
     /// Siła sygnału w dBm, jeśli da się odczytać.
     pub fn rssi(&self) -> Option<i8> {
         self.inner.wifi().driver().get_rssi().ok().map(|v| v as i8)
@@ -161,11 +200,51 @@ impl<'a> Wifi<'a> {
     /// rozładowanym ogniwie to generator brownoutów, a reset w trakcie odświeżania
     /// z podniesionymi szynami TPS65185 to jedyna naprawdę szkodliwa awaria tej płytki.
     pub fn shutdown(mut self) {
-        if let Err(e) = self.inner.disconnect() {
+        // Ani `disconnect()`, ani `stop()` z `BlockingWifi` NIE MA LIMITU CZASU —
+        // patrz komentarz w [`Wifi::try_connect`]. Zawieszenie akurat tutaj byłoby
+        // najgorsze z możliwych: radio zostaje na antenie, a wołający czeka, żeby
+        // dopiero po nim podnieść szyny panelu. Nagłówek `main.rs` mówi wprost, że
+        // te dwie rzeczy nigdy nie mogą być włączone naraz.
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+
+        if let Err(e) = self.inner.wifi_mut().disconnect() {
             warn!("rozłączenie WiFi zwróciło błąd: {e:#}");
+        } else if let Err(e) = wait_bounded(&self.inner, deadline, "rozłączenie WiFi", |w| {
+            w.wifi().is_connected()
+        }) {
+            warn!("{e:#}");
         }
-        if let Err(e) = self.inner.stop() {
+
+        if let Err(e) = self.inner.wifi_mut().stop() {
             warn!("zatrzymanie WiFi zwróciło błąd: {e:#}");
+        } else if let Err(e) = wait_bounded(&self.inner, deadline, "zatrzymanie WiFi", |w| {
+            w.wifi().is_started()
+        }) {
+            warn!("{e:#}");
         }
     }
+}
+
+/// Czeka, aż `matcher` przestanie być prawdziwy, ale nie dłużej niż do `deadline`.
+///
+/// Istnieje, bo `BlockingWifi` w esp-idf-svc 0.52.1 czeka **bez limitu** w `start`,
+/// `stop` i `disconnect` (`wifi_wait_while(..., None)`), a limit ma wyłącznie
+/// `connect`. Blokada w którymkolwiek z tych trzech to zawieszenie bez paniki
+/// i bez resetu — czyli urządzenie, które stoi w nieskończoność z ostatnią klatką
+/// na szkle.
+fn wait_bounded<F>(
+    wifi: &BlockingWifi<EspWifi<'_>>,
+    deadline: Instant,
+    co: &str,
+    matcher: F,
+) -> Result<()>
+where
+    F: Fn(&BlockingWifi<EspWifi<'_>>) -> Result<bool, esp_idf_svc::sys::EspError>,
+{
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        bail!("budżet wyczerpany przed: {co}");
+    }
+    wifi.wifi_wait_while(|| matcher(wifi), Some(left))
+        .with_context(|| format!("{co} nie zdążyło w {left:?}"))
 }
