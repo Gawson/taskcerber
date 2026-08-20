@@ -144,15 +144,20 @@ impl<'a> Wifi<'a> {
 
         let deadline = Instant::now() + budget;
 
-        // `BlockingWifi::start()` NIE MA LIMITU CZASU — w esp-idf-svc 0.52.1 woła
-        // `wifi_wait_while(..., None)`. Jeśli zdarzenie `STA_START` nigdy nie
-        // przyjdzie, blokuje się **na zawsze**: bez paniki, bez resetu, bez śladu.
-        // Dokładnie tak wyglądał objaw ze sprzętu — na kablu urządzenie stało
-        // w kroku sieciowym i nigdy nie dochodziło nawet do znacznika snu.
+        // NIE UŻYWAMY tu `BlockingWifi::start()` ani `connect()`, i to jest sedno
+        // całej tej funkcji.
         //
-        // To samo dotyczy `stop()` i `disconnect()`. Limit ma tylko `connect()`
-        // (15 s, zaszyte w esp-idf-svc). Dlatego wołamy nieblokujący sterownik
-        // i czekamy SAMI, z naszym budżetem.
+        // `start()`, `stop()` i `disconnect()` w esp-idf-svc 0.52.1 wołają
+        // `wifi_wait_while(..., None)` — czyli czekają na zdarzenie **bez żadnego
+        // limitu**, aż po `xSemaphoreTake(..., portMAX_DELAY)`. Zawieszenie tam jest
+        // dosłownie wieczne: task stoi w `Blocked`, więc nie ma paniki ani resetu,
+        // a task watchdog tego nie łapie z definicji — zablokowany task oddaje
+        // procesor i idle karmi WDT normalnie.
+        //
+        // `connect()` limit niby ma (15 s), ale to limit CISZY, nie termin — patrz
+        // [`wait_bounded`]. Przy sieci sypiącej `STA_DISCONNECTED` stoi dowolnie długo.
+        //
+        // Dlatego wołamy nieblokujący sterownik i czekamy sami, odpytując flagę.
         info!("  · start sterownika");
         wifi.wifi_mut()
             .start()
@@ -162,25 +167,20 @@ impl<'a> Wifi<'a> {
         })?;
 
         info!("  · asocjacja");
-        wifi.connect().context("asocjacja nie powiodła się")?;
+        wifi.wifi_mut()
+            .connect()
+            .context("asocjacja nie powiodła się")?;
+        wait_bounded(wifi, deadline, "asocjacja", |w| {
+            w.wifi().is_connected().map(|c| !c)
+        })?;
         info!("  · czekam na adres");
 
-        // `BlockingWifi::wait_netif_up` ma WŁASNY limit 15 s zaszyty w esp-idf-svc
-        // i nie przyjmuje naszego. Wcześniej stało tu właśnie ono, a nasz `deadline`
-        // był sprawdzany DOPIERO PO POWROCIE — czyli nie ograniczał niczego, tylko
-        // meldował, że czas już minął. Przy dwóch próbach (zapamiętany AP, potem
-        // zwykłe wyszukiwanie) dawało to minutę stania na samym WiFi, przy ośmiu
-        // sekundach obiecanych w dokumentacji tej stałej.
-        //
-        // `ip_wait_while` to ta sama funkcja, do której `wait_netif_up` deleguje,
-        // tylko przyjmuje limit — więc podajemy nasz, i to ten, który ZOSTAŁ.
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            bail!("budżet na podłączenie wyczerpany przed uzyskaniem adresu");
-        }
-        let w: &BlockingWifi<EspWifi<'_>> = wifi;
-        w.ip_wait_while(|| w.is_up().map(|up| !up), Some(left))
-            .context("interfejs sieciowy nie wstał w wyznaczonym czasie")?;
+        // Wcześniej stało tu `wait_netif_up()`, a nasz `deadline` był sprawdzany
+        // DOPIERO PO jego powrocie — czyli nie ograniczał niczego, tylko meldował,
+        // że czas już minął. Potem było `ip_wait_while(..., Some(left))`, co też nie
+        // pomogło, bo tamten „limit" jest limitem CISZY, nie terminem. Szczegóły
+        // przy [`wait_bounded`], które jako jedyne trzyma tu prawdziwy termin.
+        wait_bounded(wifi, deadline, "uzyskanie adresu", |w| w.is_up().map(|up| !up))?;
         Ok(())
     }
 
@@ -237,13 +237,31 @@ impl<'a> Wifi<'a> {
     }
 }
 
-/// Czeka, aż `matcher` przestanie być prawdziwy, ale nie dłużej niż do `deadline`.
+/// Czeka, aż `matcher` przestanie być prawdziwy — z TWARDYM terminem.
 ///
-/// Istnieje, bo `BlockingWifi` w esp-idf-svc 0.52.1 czeka **bez limitu** w `start`,
-/// `stop` i `disconnect` (`wifi_wait_while(..., None)`), a limit ma wyłącznie
-/// `connect`. Blokada w którymkolwiek z tych trzech to zawieszenie bez paniki
-/// i bez resetu — czyli urządzenie, które stoi w nieskończoność z ostatnią klatką
-/// na szkle.
+/// # Dlaczego odpytywanie, a nie `wifi_wait_while(..., Some(limit))`
+///
+/// Bo tamten limit nie jest terminem. `esp-idf-svc` czeka tak
+/// (`private/waitable.rs`, `wait_timeout_while_and_get`):
+///
+/// ```ignore
+/// loop {
+///     if !condition(&state)? { return ... }
+///     state = self.cvar.wait_timeout(state, dur)?;   // dur NIEZMIENIONE
+/// }
+/// ```
+///
+/// `dur` jest podawane od nowa przy każdym obrocie, więc to jest **limit CISZY**,
+/// a nie limit całkowity: każde powiadomienie, które nie spełnia warunku, restartuje
+/// pełne odliczanie. Przy sieci sypiącej `STA_DISCONNECTED` — na przykład przy złym
+/// haśle — `connect()` z jego piętnastoma sekundami potrafi stać dowolnie długo.
+///
+/// To jest powód, dla którego poprzednia poprawka (przekazanie `Some(budget)`
+/// zamiast `None`) NIE POMOGŁA: odziedziczyła dokładnie tę samą wadę.
+///
+/// Odpytywanie flagi jest tu tańsze, niż wygląda: `is_started`, `is_connected`
+/// i `is_up` czytają pole struktury utrzymywane przez handler sterownika, więc
+/// obrót pętli to kilka instrukcji i `vTaskDelay`. Za to termin jest terminem.
 fn wait_bounded<F>(
     wifi: &BlockingWifi<EspWifi<'_>>,
     deadline: Instant,
@@ -253,10 +271,17 @@ fn wait_bounded<F>(
 where
     F: Fn(&BlockingWifi<EspWifi<'_>>) -> Result<bool, esp_idf_svc::sys::EspError>,
 {
-    let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-        bail!("budżet wyczerpany przed: {co}");
+    /// Sto milisekund: dość rzadko, żeby nie kręcić rdzeniem, i dość gęsto, żeby
+    /// nie dokładać zauważalnie do czasu z radiem na antenie.
+    const POLL: Duration = Duration::from_millis(100);
+
+    loop {
+        if !matcher(wifi).with_context(|| format!("odczyt stanu przy: {co}"))? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("{co} nie zdążyło w wyznaczonym czasie");
+        }
+        std::thread::sleep(POLL);
     }
-    wifi.wifi_wait_while(|| matcher(wifi), Some(left))
-        .with_context(|| format!("{co} nie zdążyło w {left:?}"))
 }
