@@ -176,6 +176,22 @@ fn run(mut state: RtcState) -> Result<u64> {
     );
 
     // --- 5. Sieć ---------------------------------------------------------------
+    //
+    // `Epd` powstaje TUTAJ, a nie dopiero w kroku 6, żeby dało się wypisywać postęp
+    // WPROST NA PANEL — patrz [`NetTrace`]. Kosztuje to ~780 KB w PSRAM trzymane
+    // przez czas TLS-a, co przy ośmiu megabajtach nie robi różnicy.
+    //
+    // Sama sekwencja wyłączania i tak dostaje go później w ręce, więc reguła
+    // „panel z podniesionymi szynami nie może wejść w deep sleep" zostaje spełniona.
+    let mut epd = Epd::new(&bus).context("nie mogę zainicjalizować panelu")?;
+
+    // epdiy właśnie przestawiło cały port 1 ekspandera na wyjścia — łącznie z bitem
+    // przycisku, którego samo nie używa. Bez tego odczyt przycisku zwraca „wciśnięty"
+    // bez końca. Szczegóły: `Pca9535::reclaim_button_input`.
+    if let Err(e) = hw.expander.reclaim_button_input() {
+        warn!("nie mogę odzyskać bitu przycisku na ekspanderze: {e:#}");
+    }
+
     let requested = std::mem::take(&mut state.fetch_requested);
     if requested {
         info!("pobranie na życzenie z poprzedniego cyklu");
@@ -213,6 +229,12 @@ fn run(mut state: RtcState) -> Result<u64> {
     // także w nocy. Flagę zdejmujemy tutaj, a nie po udanym pobraniu: gdyby sieć
     // zawiodła, powtarzanie życzenia sprzed godziny nie jest już tym, o co ktoś prosił.
     } else if requested || (policy.should_fetch(mode) && !matches!(mode, Mode::Night)) {
+        // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
+        let mut trace = if NET_TRACE_ON_PANEL && power_status.usb_present {
+            NetTrace::begin(&mut epd, rotation, temperature)
+        } else {
+            None
+        };
         match fetch_everything(
             peripherals.modem,
             sysloop,
@@ -224,11 +246,14 @@ fn run(mut state: RtcState) -> Result<u64> {
             home_tz,
             now,
             power::may_update(&policy, mode, fuel),
+            &mut epd,
+            trace.as_mut(),
         ) {
             Ok(out) => {
-                // Restart natychmiast: radio jest już wyłączone, a panelu jeszcze
-                // nie dotykaliśmy — `Epd::new` jest niżej. Reset przy podniesionych
-                // szynach TPS65185 potrafi uszkodzić panel, więc kolejność ma znaczenie.
+                // Restart natychmiast: radio jest już wyłączone, a szyny panelu są
+                // opuszczone — `Epd` istnieje od kroku 5, ale `present` gasi je po
+                // każdym odświeżeniu. Reset przy podniesionych szynach TPS65185
+                // potrafi uszkodzić panel, więc kolejność ma znaczenie.
                 //
                 // `state.store()` tutaj NIE MA i to nie jest przeoczenie: bootloader
                 // przeładowuje segmenty RTC z obrazu przy każdym resecie, który nie
@@ -272,18 +297,6 @@ fn run(mut state: RtcState) -> Result<u64> {
     // --- 6. Render i wypchnięcie na panel --------------------------------------
     // Radio jest już wyłączone — patrz komentarz na górze pliku.
     //
-    // `Epd` powstaje TUTAJ, nie w `paint`, bo sekwencja wyłączania musi dostać go
-    // w ręce po tym, jak rysowanie się skończy — także wtedy, gdy skończyło się
-    // błędem. Panel z podniesionymi szynami wchodzący w deep sleep to 235 mA.
-    let mut epd = Epd::new(&bus).context("nie mogę zainicjalizować panelu")?;
-
-    // epdiy właśnie przestawiło cały port 1 ekspandera na wyjścia — łącznie z bitem
-    // przycisku, którego samo nie używa. Bez tego odczyt przycisku zwraca „wciśnięty"
-    // bez końca. Szczegóły: `Pca9535::reclaim_button_input`.
-    if let Err(e) = hw.expander.reclaim_button_input() {
-        warn!("nie mogę odzyskać bitu przycisku na ekspanderze: {e:#}");
-    }
-
     // Porównujemy z CRC sprzed pobrania, nie z polem stanu — patrz `painted_crc`.
     // Przeciw `state.last_content_crc` warunek był tożsamościowo fałszywy po każdym
     // udanym pobraniu, czyli panel nie odświeżał się już nigdy po pierwszym boocie,
@@ -415,6 +428,78 @@ fn run(mut state: RtcState) -> Result<u64> {
     Ok(sleep_s)
 }
 
+/// Wypisuje postęp kroku sieciowego WPROST NA PANEL.
+///
+/// # Po co, skoro jest log
+///
+/// Bo panel jest jedynym wyjściem, które zawsze jest. Log wymaga kabla i otwartego
+/// monitora, a krok sieciowy to jedyne miejsce, w którym to urządzenie potrafiło
+/// stanąć bez śladu: krok 5 idzie PRZED krokiem 6, więc przy zawieszeniu panel
+/// zostaje z poprzednią klatką i nie wiadomo nawet, czy urządzenie wstało.
+///
+/// Ostatni wypisany krok jest wtedy jedyną informacją o tym, gdzie stanęło.
+///
+/// # Dlaczego to jest ograniczone do USB
+///
+/// Nagłówek tego pliku zabrania trzymać radio i szyny panelu włączone naraz: panel
+/// ciągnie ~115 mA, szczyt nadajnika ~340 mA, a razem przez LDO na zużytym ogniwie
+/// to brownout — i reset w trakcie odświeżania z podniesionymi szynami TPS65185
+/// jest jedyną naprawdę szkodliwą awarią tej płytki.
+///
+/// Ta reguła chroni OGNIWO. Na kablu prądu wystarcza, a radio i tak wstaje teraz
+/// wyłącznie przy USB (patrz [`RADIO_ONLY_ON_USB`]), więc podczas bring-upu można
+/// rysować w trakcie. Na baterii ten ślad się NIE WŁĄCZA i to nie jest opcja.
+struct NetTrace {
+    canvas: Gray8,
+    fonts: Fonts<'static>,
+    rotation: Rotation,
+    temperature_c: i32,
+    band: dashboard::Rect,
+    started: std::time::Instant,
+}
+
+impl NetTrace {
+    /// Czyści panel i przygotowuje pas na komunikaty.
+    ///
+    /// Pełne odświeżenie na wejściu jest konieczne, nie ozdobne: `back_fb` epdiy
+    /// powstaje wyzerowany do bieli i nie wie nic o tym, co zostało na szkle, więc
+    /// bez niego kolejne odświeżenia częściowe rysowałyby różnicę z niewłaściwego
+    /// punktu odniesienia.
+    fn begin(epd: &mut Epd, rotation: Rotation, temperature_c: i32) -> Option<Self> {
+        let fonts = Fonts::embedded();
+        let mut canvas = Gray8::new(rotation);
+        let w = canvas.width() as i32;
+        let h = canvas.height() as i32;
+
+        dashboard::layout::render_net_trace(&fonts, &mut canvas);
+        if let Err(e) = epd.present(&canvas, Refresh::Full, temperature_c) {
+            error!("nie mogę wyczyścić panelu pod ślad sieciowy: {e:#}");
+            return None;
+        }
+
+        Some(Self {
+            canvas,
+            fonts,
+            rotation,
+            temperature_c,
+            band: dashboard::Rect::new(0, h / 2 - 30, w, 60),
+            started: std::time::Instant::now(),
+        })
+    }
+
+    /// Wypisuje jeden krok i wypycha sam pas.
+    fn step(&mut self, epd: &mut Epd, co: &str) {
+        let ms = self.started.elapsed().as_millis();
+        info!("krok5[{ms} ms]: {co}");
+
+        dashboard::layout::draw_net_step(&self.fonts, &mut self.canvas, self.band, co, ms);
+        let area = self.rotation.canvas_rect_to_panel(self.band);
+        if let Err(e) = epd.present_area(&self.canvas, area, self.temperature_c) {
+            warn!("nie mogę wypisać kroku na panel: {e:#}");
+        }
+    }
+}
+
 /// Wynik fazy sieciowej.
 struct Fetched {
     events: Vec<dashboard::model::CalEvent>,
@@ -438,20 +523,37 @@ fn fetch_everything(
     home_tz: chrono_tz::Tz,
     now: NaiveDateTime,
     ota_allowed: bool,
+    epd: &mut Epd,
+    trace: Option<&mut NetTrace>,
 ) -> Result<Fetched> {
     let ssid = config.ssid.as_deref().unwrap_or_default();
     let password = config.password.as_deref().unwrap_or_default();
 
+    let mut trace = trace;
+    // Jeden zapis kroku: do logu zawsze, na panel gdy ślad jest włączony.
+    macro_rules! krok {
+        ($co:expr) => {
+            match trace.as_deref_mut() {
+                Some(t) => t.step(epd, $co),
+                None => info!("krok5: {}", $co),
+            }
+        };
+    }
+
+    krok!("podnoszę radio");
     let wifi = net::wifi::Wifi::connect(modem, sysloop, nvs, ssid, password, state)?;
+    krok!("radio gotowe");
     if let Some(rssi) = wifi.rssi() {
         info!("RSSI: {rssi} dBm");
     }
 
     // Czas przed HTTPS — przy CONFIG_MBEDTLS_HAVE_TIME_DATE=y zły zegar to
     // odrzucony certyfikat.
+    krok!("SNTP");
     if let Err(e) = net::time::sync_sntp(&hw.rtc, home_tz) {
         warn!("SNTP zawiódł: {e:#}");
     }
+    krok!("czas ustalony");
 
     let now = net::time::now_local(home_tz).unwrap_or(now);
     let from = now.date().and_hms_opt(0, 0, 0).unwrap_or(now);
@@ -481,6 +583,7 @@ fn fetch_everything(
     let mut any_ok = false;
     let mut last_error = None;
     for src in &sources {
+        krok!(&format!("pobieram: {}", src.name()));
         match src.fetch(from, to) {
             Ok(result) => {
                 crc ^= result.content_crc;
@@ -498,6 +601,7 @@ fn fetch_everything(
     //
     // Po kalendarzu, bo kalendarz jest funkcją urządzenia, a aktualizacja tylko
     // utrzymaniem: nieudane albo długie OTA nie ma prawa zabrać ekranowi treści.
+    krok!("kalendarze pobrane");
     let mut ota_installed = false;
     if ota_allowed {
         match config.ota_url.as_deref() {
@@ -703,6 +807,13 @@ fn unix_to_local(unix: i64, tz: chrono_tz::Tz) -> Option<NaiveDateTime> {
 /// ogniwa na tym egzemplarzu JEST nieznany — BQ27220 nie był nigdy uruchomiony
 /// i `battery_percent` bywa `None`, co polityka trybu przepuszcza jak pełną baterię.
 const RADIO_ONLY_ON_USB: bool = true;
+
+/// Czy wypisywać postęp kroku sieciowego wprost na panel.
+///
+/// Rzecz na czas bring-upu i jedyne narzędzie, które działa bez kabla i bez
+/// przeglądarki. Pełne uzasadnienie przy [`NetTrace`] — łącznie z tym, dlaczego
+/// włącza się WYŁĄCZNIE przy obecnym USB.
+const NET_TRACE_ON_PANEL: bool = true;
 
 /// Czy urządzenie ma zostawiać kontroler dotyku przy życiu na czas snu, żeby
 /// dotknięcie mogło je obudzić.

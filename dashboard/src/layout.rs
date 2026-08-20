@@ -854,6 +854,70 @@ pub fn render_saved(fonts: &Fonts, c: &mut Gray8) -> Screen {
     Screen::default()
 }
 
+/// Tło śladu sieciowego: nagłówek i nic poza nim.
+///
+/// Ekran diagnostyczny na czas bring-upu — patrz `NetTrace` w firmwarze. Ma być
+/// pusty, bo jedyne, co ma na nim być widać, to ostatni wypisany krok.
+pub fn render_net_trace(fonts: &Fonts, c: &mut Gray8) {
+    c.clear(WHITE);
+    let g = Geom::of(c);
+    fonts.draw(
+        c,
+        "sieć",
+        g.margin as f32,
+        56.0,
+        TEXT_HEAD,
+        Weight::Bold,
+        BLACK,
+        Align::Left,
+    );
+    fonts.draw(
+        c,
+        "ostatni krok zostaje na ekranie",
+        g.margin as f32,
+        84.0,
+        TEXT_BODY,
+        Weight::Medium,
+        INK_DIM,
+        Align::Left,
+    );
+    hline(c, g.margin, 96, g.w - 2 * g.margin, 2, BLACK);
+    c.quantize_ink();
+}
+
+/// Wpisuje jeden krok w pas śladu sieciowego.
+///
+/// Pas jest czyszczony do bieli i rysowany od nowa, bo interesuje nas WYŁĄCZNIE
+/// ostatni krok — historia jest w logu, a na e-papierze każda dodatkowa linia to
+/// kolejne odświeżenie.
+pub fn draw_net_step(fonts: &Fonts, c: &mut Gray8, band: Rect, co: &str, ms: u128) {
+    let g = Geom::of(c);
+    c.fill_rect(band, WHITE);
+
+    let co = fonts.truncate(co, (g.w - 2 * g.margin) as f32, TEXT_LEAD, Weight::Medium);
+    fonts.draw(
+        c,
+        &co,
+        g.margin as f32,
+        (band.y + 26) as f32,
+        TEXT_LEAD,
+        Weight::Medium,
+        BLACK,
+        Align::Left,
+    );
+    fonts.draw(
+        c,
+        &format!("{ms} ms"),
+        g.margin as f32,
+        (band.y + 52) as f32,
+        TEXT_BODY,
+        Weight::Medium,
+        INK_DIM,
+        Align::Left,
+    );
+    c.quantize_ink_rect(band);
+}
+
 // ---------------------------------------------------------------------------
 // Widok szczegółów wydarzenia
 // ---------------------------------------------------------------------------

@@ -47,14 +47,20 @@ impl<'a> Wifi<'a> {
         password: &str,
         state: &mut RtcState,
     ) -> Result<Self> {
+        // Znaczniki kroków. Ścieżka sieciowa jest jedynym miejscem, w którym
+        // urządzenie potrafiło stanąć bez śladu — a wtedy ostatnia wypisana linia
+        // jest jedyną informacją o tym, GDZIE stanęło. Każdy krok mówi, ile trwał.
+        let started = Instant::now();
+        let krok = |co: &str| info!("sieć[{} ms]: {co}", started.elapsed().as_millis());
+
+        krok("inicjalizuję sterownik");
         let esp_wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs))
             .context("nie mogę zainicjalizować WiFi")?;
         let mut wifi = BlockingWifi::wrap(esp_wifi, sysloop).context("nie mogę opakować WiFi")?;
-
-        let started = Instant::now();
+        krok("sterownik gotowy");
 
         if state.ap_cached {
-            info!("próbuję zapamiętanego AP na kanale {}", state.ap_channel);
+            krok("próbuję zapamiętanego AP");
             match Self::try_connect(
                 &mut wifi,
                 ssid,
@@ -68,6 +74,7 @@ impl<'a> Wifi<'a> {
                     return Ok(Self { inner: wifi });
                 }
                 Err(e) => {
+                    krok("zapamiętany AP odpadł, zatrzymuję sterownik");
                     warn!("zapamiętany AP nie odpowiedział ({e:#}), unieważniam bufor");
                     state.invalidate_ap();
                     // Z limitem:  z esp-idf-svc czeka bez końca.
@@ -83,8 +90,10 @@ impl<'a> Wifi<'a> {
         if left.is_zero() {
             bail!("budżet {CONNECT_TIMEOUT:?} na podłączenie wyczerpany przez zapamiętany AP");
         }
+        krok("szukam sieci");
         Self::try_connect(&mut wifi, ssid, password, None, None, left)
             .context("nie mogę połączyć się z siecią")?;
+        krok("połączony");
 
         // Zapamiętaj, z czym się udało.
         if let Ok(info) = wifi.wifi().sta_netif().get_ip_info() {
@@ -144,6 +153,7 @@ impl<'a> Wifi<'a> {
         // To samo dotyczy `stop()` i `disconnect()`. Limit ma tylko `connect()`
         // (15 s, zaszyte w esp-idf-svc). Dlatego wołamy nieblokujący sterownik
         // i czekamy SAMI, z naszym budżetem.
+        info!("  · start sterownika");
         wifi.wifi_mut()
             .start()
             .context("nie mogę wystartować WiFi")?;
@@ -151,7 +161,9 @@ impl<'a> Wifi<'a> {
             w.wifi().is_started().map(|s| !s)
         })?;
 
+        info!("  · asocjacja");
         wifi.connect().context("asocjacja nie powiodła się")?;
+        info!("  · czekam na adres");
 
         // `BlockingWifi::wait_netif_up` ma WŁASNY limit 15 s zaszyty w esp-idf-svc
         // i nie przyjmuje naszego. Wcześniej stało tu właśnie ono, a nasz `deadline`

@@ -621,6 +621,20 @@ impl Gray8 {
         }
     }
 
+    /// [`Gray8::quantize_ink`] ograniczone do prostokąta.
+    pub fn quantize_ink_rect(&mut self, r: Rect) {
+        let x0 = r.x.clamp(0, self.w as i32) as usize;
+        let x1 = r.right().clamp(0, self.w as i32) as usize;
+        let y0 = r.y.clamp(0, self.h as i32) as usize;
+        let y1 = r.bottom().clamp(0, self.h as i32) as usize;
+        for y in y0..y1 {
+            let row = y * self.w;
+            for x in x0..x1 {
+                self.px[row + x] = ink_level(self.px[row + x]);
+            }
+        }
+    }
+
     /// To samo, ale tylko na wskazanym prostokącie płótna — dla odrysowań
     /// przyrostowych, które dotykają kilku prostokątów zamiast całości.
     pub fn quantize2_rect(&mut self, r: Rect) {
