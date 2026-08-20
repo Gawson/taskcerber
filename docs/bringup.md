@@ -47,6 +47,40 @@ boot do gotowości: 312 ms
 | `boot do gotowości > 600 ms` | pomiar 5: memtest PSRAM albo walidacja obrazu przy każdym wybudzeniu |
 | `boot #2` i dalej rosnące | pomiar 4: `.rtc.data` przeżywa deep sleep, linker nie wyciął sekcji |
 
+### Karta tonów — które szarości ten panel naprawdę pokazuje
+
+`GRAY_TEST_CARD` w `firmware/src/main.rs` zamienia normalny ekran na kartę pomiarową.
+Wgraj, obejrzyj, przestaw z powrotem na `false`. Podgląd na hoście:
+`cargo run -p preview -- tony`.
+
+Karta odpowiada na trzy pytania, których nie da się rozstrzygnąć inaczej niż na szkle.
+
+**1. Drabina szesnastu poziomów.** Każdy poziom pokazany naraz jako plama, jako tekst
+24 px i jako linie 1/2/4 px — bo panel traktuje je zupełnie inaczej. Poziom bywa
+czytelny jako plama i niewidoczny jako litera, i to jest normalne: cienka kreska
+dostaje krótszy impuls. Notuj OSOBNO dla każdej z trzech kolumn:
+
+* od którego poziomu w dół próbka jest odróżnialna od bieli,
+* do którego poziomu w górę jest odróżnialna od czerni,
+* które sąsiednie poziomy da się od siebie odróżnić (jeśli 3 i 4 wyglądają tak samo,
+  to paleta ma prawo mieć tylko co drugi).
+
+Wynik wpisuje się do stałych w `dashboard::canvas` — a nie odwrotnie.
+
+**2. Dither kontra półton.** Pary kwadratów o tej samej gęstości czerni: po lewej
+dither z macierzy Bayera (wyłącznie czerń i biel), po prawej prawdziwy półton.
+Dither używa dwóch stanów, które waveform dowozi pewnie, więc na e-papierze bywa
+równiejszy i stabilniejszy niż półton — zwłaszcza po odświeżeniu częściowym, które
+półtonów nie umie w ogóle. Jeśli lewy kwadrat wygląda lepiej, jasne wypełnienia
+w interfejsie mają być ditherowane, a nie szare.
+
+**3. Biel po pełnym odświeżeniu kontra biel po częściowym.** Dwa obrysowane pola na
+dole. Oba są w płótnie identyczne co do bitu i oba są bielą; różni je wyłącznie to,
+czym zostały odświeżone — lewe zostało po `epd_fullclear` + GC16, prawe („DU")
+dostało dodatkowo odświeżenie częściowe. Jeśli prawe jest wyraźnie jaśniejsze, to
+jest zmierzone źródło efektu „odświeżony prostokąt jest bielszy niż tło": GC16 układa
+biel w szesnastopoziomowej skali, a DU dowozi piksel do szyny.
+
 ### Czas panelu: skąd wiadomo, ile naprawdę trwa klatka
 
 Nic tu nie trzeba mierzyć samemu — i firmware, i epdiy same się z tego spowiadają.

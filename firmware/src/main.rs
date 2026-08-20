@@ -293,6 +293,21 @@ fn run(mut state: RtcState) -> Result<u64> {
     // okno da się otworzyć bez podnoszenia szyn panelu. Wcześniej pętla interaktywna
     // siedziała w środku `if needs_paint` i skonfigurowane urządzenie na kablu,
     // z niezmienioną treścią, nie dostawało okna w ogóle.
+    // --- Karta tonów: bring-up, nie funkcja produktu ---------------------------
+    if GRAY_TEST_CARD {
+        show_test_card(&mut epd, temperature, rotation);
+        info!("karta tonów wyrysowana — urządzenie idzie spać, obraz zostaje na szkle");
+        // Ta sama sekwencja zasypiania, co na normalnej ścieżce. Bez niej BOOT
+        // przestałby budzić (brak `enable_wakeup`), a magistrala panelu poszłaby
+        // w sen niezaizolowana — czyli karta pomiarowa kłamałaby o prądzie
+        // spoczynkowym i o tym, czy urządzenie w ogóle da się obudzić.
+        shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
+        if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
+            warn!("nie mogę włączyć budzenia: {e:#}");
+        }
+        return Ok(TEST_CARD_SLEEP_S);
+    }
+
     if needs_paint || interact {
         let model = if config.is_provisioned() {
             build_model(now, events, fuel, power_status.usb_present, net_state)
@@ -660,12 +675,6 @@ const SETUP_IDLE_MS: u64 = 90_000;
 /// Po tylu nieudanych odczytach z rzędu uznajemy kontroler dotyku za nieobecny.
 /// Odpytywanie martwej magistrali przez całe okno to czysto stracona energia.
 const TOUCH_ERRORS_BEFORE_GIVING_UP: u8 = 8;
-
-/// Ile znaków wolno wpisać między pełnymi odświeżeniami.
-///
-/// Każde naciśnięcie klawisza to odświeżenie DU (~0,28 s), które zostawia duchy.
-/// Ten sam próg co dla agendy — patrz [`epd::FAST_REFRESHES_BEFORE_FULL`].
-const EDITS_BEFORE_FULL: u8 = epd::FAST_REFRESHES_BEFORE_FULL;
 
 /// Czy po narysowaniu ekranu warto zostać na jawie i czekać na dotyk.
 ///
@@ -1106,7 +1115,6 @@ fn setup_screen(
     // Wykrywanie zbocza siedzi w wątku czytającym i jest ciągłe przez oba ekrany,
     // więc palec wciąż leżący na szkle po wejściu tutaj nie generuje fantomowego
     // naciśnięcia, a po powrocie nie gubi się pierwsze stuknięcie.
-    let mut edits = 0u8;
     let mut deadline = Instant::now() + Duration::from_millis(SETUP_IDLE_MS);
 
     // Stan wyświetlania trzymamy jako różnicę dwóch rzeczy: co panel POKAZUJE i co
@@ -1167,7 +1175,7 @@ fn setup_screen(
                     force_push = true;
                     screen = render_setup_frame(&setup, rotation, None).1;
                 }
-                Applied::Edited => edits = edits.saturating_add(1),
+                Applied::Edited => {}
                 Applied::Ignored => {}
             }
 
@@ -1198,36 +1206,6 @@ fn setup_screen(
 
         // --- 3. Czy już wypychać ---------------------------------------------
         let Some(since) = pending_since else {
-            // Nic nie czeka na wypchnięcie. To jedyny moment, w którym wolno
-            // zapłacić za czyszczenie duchów: użytkownik szuka wzrokiem następnego
-            // klawisza, a nie patrzy na znak, który właśnie wpisał.
-            if edits >= EDITS_BEFORE_FULL
-                && last_input.elapsed() >= Duration::from_millis(FULL_AFTER_IDLE_MS)
-            {
-                edits = 0;
-                let started = Instant::now();
-                epd.hold_power(true);
-                // Przy okazji gaśnie negatyw ostatniego klawisza — to jedyne miejsce
-                // poza następnym naciśnięciem, które go sprząta.
-                want_pressed = None;
-                let (fresh, fresh_screen) = repaint_setup(
-                    epd,
-                    &setup,
-                    state,
-                    temperature_c,
-                    rotation,
-                    Refresh::Full,
-                    None,
-                );
-                canvas = fresh;
-                screen = fresh_screen;
-                touched.clear();
-                info!(
-                    "czyszczenie duchów w przerwie: {} ms",
-                    started.elapsed().as_millis()
-                );
-                continue;
-            }
             if last_input.elapsed() >= Duration::from_millis(POWER_HOLD_IDLE_MS) {
                 epd.hold_power(false);
             }
@@ -1437,6 +1415,50 @@ fn repaint_setup(
     (canvas, screen)
 }
 
+/// Czy zamiast normalnego ekranu wyrysować kartę tonów.
+///
+/// Rzecz na czas bring-upu, jak [`SLEEP_MARKER`]. Karta odpowiada na pytanie, którego
+/// nie da się rozstrzygnąć na hoście ani policzyć z noty katalogowej: **które z
+/// szesnastu deklarowanych poziomów szarości ten egzemplarz naprawdę pokazuje**,
+/// osobno dla plam, tekstu i cienkich linii, i czy dither z czerni i bieli nie
+/// wypada lepiej niż prawdziwy półton o tej samej gęstości.
+///
+/// Dopóki to nie jest zmierzone, każdy wybór odcienia w `dashboard::layout` jest
+/// zgadywaniem — a objawy („elementy blade jak artefakty") wskazują, że zgadywanie
+/// wyszło źle. Po odczytaniu karty przestawić na `false`.
+const GRAY_TEST_CARD: bool = true;
+
+/// Jak długo urządzenie śpi po wyrysowaniu karty.
+///
+/// E-papier trzyma obraz bez zasilania, więc karta zostaje na szkle przez cały sen
+/// i można ją oglądać bez pośpiechu. Godzina jest po to, żeby płytka zostawiona
+/// na biurku nie budziła się w kółko.
+const TEST_CARD_SLEEP_S: u64 = 3_600;
+
+/// Rysuje kartę tonów i wypycha jej pole „DU" osobno.
+///
+/// Kolejność jest istotna i jest w niej cały trzeci pomiar: najpierw CAŁA karta idzie
+/// pełnym odświeżeniem (`epd_fullclear` + GC16), a dopiero potem jeden prostokąt
+/// dostaje odświeżenie częściowe (MODE_DU). Oba pola są bielą i w płótnie są
+/// identyczne co do bitu — więc każda różnica, jaką widać na szkle, pochodzi
+/// wyłącznie z tego, czym je odświeżono. To jest ta różnica, przez którą odświeżone
+/// fragmentarycznie prostokąty wyglądają na jaśniejsze od tła.
+fn show_test_card(epd: &mut Epd, temperature_c: i32, rotation: Rotation) {
+    let fonts = Fonts::embedded();
+    let mut canvas = Gray8::new(rotation);
+    let du_box = dashboard::render_test_card(&fonts, &mut canvas);
+
+    if let Err(e) = epd.present(&canvas, Refresh::Full, temperature_c) {
+        error!("nie mogę wyrysować karty tonów: {e:#}");
+        return;
+    }
+    let area = rotation.canvas_rect_to_panel(du_box);
+    if let Err(e) = epd.present_area(&canvas, area, temperature_c) {
+        warn!("nie mogę wypchnąć pola DU karty: {e:#}");
+    }
+    epd.ensure_powered_off();
+}
+
 /// Czy rysować znacznik zasypiania. Rzecz na czas bring-upu: bez niego nie da się
 /// odróżnić „urządzenie mnie ignoruje" od „urządzenie śpi", bo e-papier trzyma obraz
 /// tak samo w obu wypadkach — a śpi prawie zawsze.
@@ -1476,14 +1498,6 @@ fn mark_going_to_sleep(epd: &mut Epd, canvas: &mut Gray8, rotation: Rotation, te
 /// power-good. Próg ma rozstrzygać „człowiek skończył pisać", a nie „człowiek
 /// szuka litery", więc jest liczony w sekundach.
 const POWER_HOLD_IDLE_MS: u64 = 6_000;
-
-/// Po jakiej przerwie w pisaniu wolno wtrącić pełne odświeżenie.
-///
-/// Czyszczenie duchów kosztuje `epd_fullclear` + GC16, czyli 126 przebiegów przez
-/// wszystkie bramki panelu. Nie ma sposobu, żeby zrobić to szybko — jest tylko
-/// sposób, żeby zrobić to wtedy, kiedy nikt nie czeka. Krócej niż tyle i wpada
-/// w naturalne przerwy między wyrazami.
-const FULL_AFTER_IDLE_MS: u64 = 1_200;
 
 /// Ile ciszy na dotyku czekamy przed wypchnięciem klatki.
 ///

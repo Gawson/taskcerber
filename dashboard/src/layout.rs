@@ -1158,6 +1158,12 @@ pub fn render_setup_pressed(
     draw_setup_summary(setup, fonts, c, &mut screen, &g);
     draw_keyboard(setup, fonts, c, &mut screen, &g, pressed);
 
+    // Ekran konfiguracji jest DWUPOZIOMOWY, bo każde naciśnięcie klawisza odświeża
+    // go przez `MODE_DU`, a ten szarości nie umie. Pełne wyjaśnienie przy
+    // [`Gray8::quantize2`]. Kwantyzacja jest tutaj, a nie w sterowniku panelu,
+    // żeby symulator i zrzuty PNG pokazywały dokładnie to, co wyjdzie na szkle.
+    c.quantize2();
+
     screen
 }
 
@@ -1349,6 +1355,10 @@ pub fn redraw_setup_value(setup: &Setup, fonts: &Fonts, c: &mut Gray8) -> Rect {
     c.fill_rect(area, WHITE);
     let mut throwaway = Screen::default();
     draw_edit_field(setup, fonts, c, &mut throwaway, &g);
+    // Dwupoziomowo, tak samo jak pełny render — inaczej odrysowany fragment miałby
+    // antyaliasing, a reszta ekranu nie, i po `MODE_DU` widać by to było jako
+    // jaśniejszy prostokąt. Pilnuje tego test `przyrostowe_odrysowanie_zgadza_sie_z_pelnym`.
+    c.quantize2_rect(area);
     area
 }
 
@@ -1374,6 +1384,11 @@ pub fn redraw_setup_keys(
         c.fill_rect(*rect, WHITE);
     }
     draw_keyboard_filtered(setup, fonts, c, &mut throwaway, &g, pressed, Some(rects));
+    // Jak w `redraw_setup_value`: fragment ma wyjść bit w bit tak, jak wyszedłby
+    // z pełnego renderu.
+    for rect in rects {
+        c.quantize2_rect(*rect);
+    }
 }
 
 /// Lista wszystkich pól z tym, co urządzenie ma zapamiętane.

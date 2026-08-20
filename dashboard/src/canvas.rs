@@ -152,6 +152,11 @@ pub const GRAY_60: u8 = 0x99;
 pub const GRAY_80: u8 = 0xCC;
 pub const WHITE: u8 = 0xFF;
 
+/// Próg, przy którym [`Gray8::quantize2`] rozstrzyga czerń od bieli.
+///
+/// 0xA8 to pokrycie ~34%, nie 50%. Uzasadnienie przy `quantize2`.
+pub const BILEVEL_THRESHOLD: u8 = 0xA8;
+
 /// Prostokąt w pikselach. Przechowywany jako `i32`, żeby układ mógł liczyć poza
 /// krawędziami bez paniki — obcinanie dzieje się przy rysowaniu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +411,60 @@ impl Gray8 {
         for p in self.px.iter_mut() {
             let hi = *p >> 4;
             *p = (hi << 4) | hi;
+        }
+    }
+
+    /// Sprowadza płótno do DWÓCH poziomów — czerni i bieli.
+    ///
+    /// # Dlaczego półtony na tym urządzeniu są kłamstwem
+    ///
+    /// Ekran jest odświeżany na dwa sposoby i tylko jeden z nich umie szarości.
+    /// `MODE_GC16` (nasze [`Refresh::Full`]) daje 16 poziomów; `MODE_DU`
+    /// ([`Refresh::Fast`]) jest **dwupoziomowy** — w słowach samego epdiy „go from
+    /// any color to black for white only". A DU to każde naciśnięcie klawisza, każda
+    /// zmiana strony i każde wejście w szczegóły.
+    ///
+    /// Skutek był widoczny gołym okiem i brany za nieposprzątane artefakty:
+    ///
+    /// * Piksel narysowany szarością wychodzi raz szary (po GC16), raz biały albo
+    ///   czarny (po DU) — **ta sama treść wygląda inaczej w zależności od tego, czym
+    ///   ją ostatnio odświeżono**.
+    /// * epdiy odświeża CAŁE wiersze, które się zmieniły (`dirty_lines`), na pełnej
+    ///   szerokości panelu. Wiersz, który dostał impuls DU, jest czystszy od
+    ///   sąsiedniego, który go nie dostał — i przy szarościach widać to jako
+    ///   **poziomy pas przez cały ekran, wysoki dokładnie na tyle, ile ma tekst**.
+    /// * Antyaliasing kroju i zaokrąglonych ramek to też półtony: obwódka klawisza
+    ///   po DU staje się jaśniejsza od tła, które impulsu nie dostało. Stąd „ramka
+    ///   bielsza niż tło".
+    ///
+    /// Przy dwóch poziomach żaden z tych efektów nie ma z czego powstać: biel
+    /// odświeżona i biel nieodświeżona wyglądają tak samo.
+    ///
+    /// # Próg jest przesunięty w stronę czerni, i to celowo
+    ///
+    /// Domyślne 0x80 (pokrycie 50%) ścieniłoby litery, a panel elektroforetyczny
+    /// i tak gubi cienkie kreski — patrz reguły typograficzne w `layout`. Przy
+    /// [`BILEVEL_THRESHOLD`] czarny zostaje każdy piksel o pokryciu powyżej ~34%,
+    /// więc kreska raczej tyje, niż chudnie.
+    pub fn quantize2(&mut self) {
+        for p in self.px.iter_mut() {
+            *p = if *p < BILEVEL_THRESHOLD { BLACK } else { WHITE };
+        }
+    }
+
+    /// To samo, ale tylko na wskazanym prostokącie płótna — dla odrysowań
+    /// przyrostowych, które dotykają kilku prostokątów zamiast całości.
+    pub fn quantize2_rect(&mut self, r: Rect) {
+        let x0 = r.x.clamp(0, self.w as i32) as usize;
+        let x1 = r.right().clamp(0, self.w as i32) as usize;
+        let y0 = r.y.clamp(0, self.h as i32) as usize;
+        let y1 = r.bottom().clamp(0, self.h as i32) as usize;
+        for y in y0..y1 {
+            let row = y * self.w;
+            for x in x0..x1 {
+                let p = &mut self.px[row + x];
+                *p = if *p < BILEVEL_THRESHOLD { BLACK } else { WHITE };
+            }
         }
     }
 }

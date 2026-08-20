@@ -28,6 +28,8 @@ use dashboard::{render, render_setup, Action, Fonts, Gray8, Model, Rotation, Set
 /// Co renderujemy. Ekran konfiguracji nie jest `Model`-em — ma własny stan — więc
 /// podgląd musi umieć jedno i drugie.
 enum Scene {
+    /// Karta tonów — nie ma modelu, rysuje się sama.
+    TestCard,
     Dash(Box<Model>),
     Config(Box<Setup>),
 }
@@ -86,6 +88,7 @@ fn main() {
                 Scene::Config(Box::new(scenario_setup_adres())),
             ),
         ],
+        "tony" | "testcard" => vec![("tony", Scene::TestCard)],
         "detail" => vec![("detail", {
             let mut m = scenario_week();
             m.focus = Some(1);
@@ -102,6 +105,10 @@ fn main() {
         let hits = match &scene {
             Scene::Dash(model) => render(model, &fonts, &mut canvas).hits.len(),
             Scene::Config(setup) => render_setup(setup, &fonts, &mut canvas).hits.len(),
+            Scene::TestCard => {
+                dashboard::render_test_card(&fonts, &mut canvas);
+                0
+            }
         };
         let render_us = started.elapsed().as_micros();
 

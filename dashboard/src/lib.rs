@@ -24,11 +24,13 @@ pub mod layout;
 pub mod model;
 pub mod setup;
 pub mod shapes;
+pub mod testcard;
 pub mod text;
 
 pub use canvas::{Gray8, Rect, Rotation, PACKED_LEN, PANEL_HEIGHT, PANEL_WIDTH};
 pub use hit::{Action, HitRegion, Screen};
 pub use layout::{render, render_setup};
+pub use testcard::render_test_card;
 pub use model::{Battery, CalEvent, DayGroup, Model, NetState, SourceTag, Tile};
 pub use setup::{Applied, Caps, Field, Setup};
 pub use text::{Align, Fonts, Weight};
