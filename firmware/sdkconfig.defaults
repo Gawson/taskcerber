@@ -45,6 +45,27 @@ CONFIG_SPIRAM_RODATA=n
 #--- CPU: race to sleep --------------------------------------------------------
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 
+# Linia cache'u danych: 64 B, NIE domyślne 32 B.
+# To nie jest strojenie, tylko warunek, pod którym epdiy w ogóle jedzie z pełną
+# prędkością. `lcd_driver.c:405-424` sprawdza EPDIY_DATA_CACHE_LINE_SIZE i przy
+# wartości < 64 SAM POŁOWI zegar piksela:
+#     lcd.config.pixel_clock = lcd.config.pixel_clock / 2;
+# ED047TC1 deklaruje bus_speed 20 MHz (`displays.c`), więc przy 32 B panel chodził
+# na 10 MHz i KAŻDA liczba czasu odświeżania była dwa razy większa: linia 25 µs
+# zamiast 13, klatka 13,6 ms zamiast 7,1, DU 68 ms zamiast 35, pełne odświeżenie
+# ~1,7 s zamiast ~0,9. epdiy krzyczy o tym trzema ESP_LOGE przy każdym starcie.
+# 64 B to zresztą wymóg burstu DMA do PSRAM, nie kaprys.
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# Tick 1 ms zamiast 10 ms.
+# Przy domyślnych 100 Hz `std::thread::sleep` poniżej jednego ticku nie usypia
+# wątku, tylko kręci busy-waitem — a wątek dotyku śpi po 8 ms i ma priorytet
+# wyższy niż pętla rysująca, więc zajeżdżał rdzeń dokładnie wtedy, gdy główny
+# wątek składał klatkę. Do tego `vTaskDelay(1)` w `epd_board_poweron` i
+# `epd_board_poweroff` epdiy kosztowało po 10 ms w każdą stronę, a granulacja
+# pętli okna interaktywnego wynosiła 10-20 ms na obrót.
+CONFIG_FREERTOS_HZ=1000
+
 #--- Sen: wyłącznie głęboki ----------------------------------------------------
 CONFIG_PM_ENABLE=n
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=n

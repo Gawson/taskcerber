@@ -1182,18 +1182,52 @@ fn setup_screen(
             continue;
         }
 
-        // --- 2. Palec zdjęty na dłużej: negatyw ma zgasnąć --------------------
-        if want_pressed.is_some() && last_input.elapsed() >= Duration::from_millis(KEY_HIGHLIGHT_MS)
-        {
-            if let Some(prev) = want_pressed {
-                remember(&mut touched, prev);
-            }
-            want_pressed = None;
-            pending_since.get_or_insert_with(Instant::now);
-        }
+        // --- 2. Negatyw pod palcem NIE gaśnie na własnym timerze --------------
+        //
+        // Wcześniej stało tu odliczanie, które po 250 ms bezczynności wypychało DRUGĄ
+        // klatkę tylko po to, żeby odbarwić klawisz. Kosztowało to dokładnie tyle samo
+        // co klatka ze znakiem — bo obszar nie skraca przebiegu, patrz `Epd::present_area`
+        // — czyli podwajało pracę panelu na każdy wpisany znak, nie wnosząc ani jednej
+        // nowej informacji: znak pojawił się już w poprzedniej klatce.
+        //
+        // Negatyw gaśnie teraz wyłącznie PRZY OKAZJI: następne naciśnięcie dokłada
+        // poprzedni klawisz do `touched` (krok 1) i odrysowuje go w tej samej klatce,
+        // w której rysuje nowy znak. Jeśli następnego naciśnięcia nie ma, klawisz
+        // zostaje zaczerniony — i dobrze, bo pokazuje, co urządzenie ostatnio przyjęło.
+        // Sprząta go czyszczenie duchów w przerwie albo wyjście z ekranu.
 
         // --- 3. Czy już wypychać ---------------------------------------------
         let Some(since) = pending_since else {
+            // Nic nie czeka na wypchnięcie. To jedyny moment, w którym wolno
+            // zapłacić za czyszczenie duchów: użytkownik szuka wzrokiem następnego
+            // klawisza, a nie patrzy na znak, który właśnie wpisał.
+            if edits >= EDITS_BEFORE_FULL
+                && last_input.elapsed() >= Duration::from_millis(FULL_AFTER_IDLE_MS)
+            {
+                edits = 0;
+                let started = Instant::now();
+                epd.hold_power(true);
+                // Przy okazji gaśnie negatyw ostatniego klawisza — to jedyne miejsce
+                // poza następnym naciśnięciem, które go sprząta.
+                want_pressed = None;
+                let (fresh, fresh_screen) = repaint_setup(
+                    epd,
+                    &setup,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Full,
+                    None,
+                );
+                canvas = fresh;
+                screen = fresh_screen;
+                touched.clear();
+                info!(
+                    "czyszczenie duchów w przerwie: {} ms",
+                    started.elapsed().as_millis()
+                );
+                continue;
+            }
             if last_input.elapsed() >= Duration::from_millis(POWER_HOLD_IDLE_MS) {
                 epd.hold_power(false);
             }
@@ -1213,15 +1247,17 @@ fn setup_screen(
         // --- 4. Jedna klatka nadrabiająca wszystko, co się wydarzyło ----------
         let started = Instant::now();
         epd.hold_power(true);
-        let periodic_full = edits >= EDITS_BEFORE_FULL;
-
-        if force_push || periodic_full {
-            let mode = if periodic_full {
-                edits = 0;
-                Refresh::Full
-            } else {
-                Refresh::Fast
-            };
+        // `force_push` to zmiana układu (inna strona klawiatury, inne pole) — pół
+        // ekranu i cała mapa dotykowa. Idzie jako pełna klatka, ale w trybie DU.
+        //
+        // Pełnego odświeżenia (`Refresh::Full`) TU NIE MA i to jest sedno poprawki.
+        // Kosztuje ono `epd_fullclear` + GC16, czyli 126 przebiegów bramek — grubo
+        // ponad sekundę czarno-białego migotania całym ekranem. Wpuszczone w środek
+        // pisania co N znaków dawało dokładnie ten objaw, przez który ta klawiatura
+        // była nie do użycia: znak, znak, znak, ZAMARCIE. Czyszczenie duchów jest
+        // teraz odkładane do przerwy w pisaniu — patrz `deferred_full` niżej.
+        if force_push {
+            let mode = Refresh::Fast;
             let (fresh, fresh_screen) = repaint_setup(
                 epd,
                 &setup,
@@ -1432,17 +1468,22 @@ fn mark_going_to_sleep(epd: &mut Epd, canvas: &mut Gray8, rotation: Rotation, te
     }
 }
 
-/// Jak długo po PUSZCZENIU palca klawisz zostaje podświetlony.
-///
-/// Podświetlenie jest potwierdzeniem, a nie animacją, więc nie wolno mu niczego
-/// blokować: znak wpisuje się w tej samej chwili, w której klawisz się zaczernia,
-/// a gaszenie jest doklejane do następnego naciśnięcia albo — gdy następnego nie ma
-/// — robione po tym czasie bezczynności. Wcześniej było odwrotnie i przez to
-/// klawiatura przyjmowała jeden znak na pełne odświeżenie ekranu.
-const KEY_HIGHLIGHT_MS: u64 = 250;
-
 /// Po jakiej bezczynności opuszczamy szyny panelu w czasie pisania.
-const POWER_HOLD_IDLE_MS: u64 = 1_500;
+///
+/// Było 1500 ms i to była wartość dobrana pod tempo pisania, którego nikt nie
+/// osiąga: przy odstępie między znakami większym niż próg KAŻDY klawisz płacił
+/// pełną sekwencję `epd_poweron` — rozmowę po I²C z TPS65185 i pętlę czekającą na
+/// power-good. Próg ma rozstrzygać „człowiek skończył pisać", a nie „człowiek
+/// szuka litery", więc jest liczony w sekundach.
+const POWER_HOLD_IDLE_MS: u64 = 6_000;
+
+/// Po jakiej przerwie w pisaniu wolno wtrącić pełne odświeżenie.
+///
+/// Czyszczenie duchów kosztuje `epd_fullclear` + GC16, czyli 126 przebiegów przez
+/// wszystkie bramki panelu. Nie ma sposobu, żeby zrobić to szybko — jest tylko
+/// sposób, żeby zrobić to wtedy, kiedy nikt nie czeka. Krócej niż tyle i wpada
+/// w naturalne przerwy między wyrazami.
+const FULL_AFTER_IDLE_MS: u64 = 1_200;
 
 /// Ile ciszy na dotyku czekamy przed wypchnięciem klatki.
 ///

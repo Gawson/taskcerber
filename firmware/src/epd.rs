@@ -72,10 +72,12 @@ fn clamp_area(r: Rect) -> Option<Rect> {
 /// Tryb odświeżania panelu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refresh {
-    /// Pełne, 16 odcieni. ~1–1,5 s. Czyści duchy. Używać przy zmianie treści.
+    /// Pełne, 16 odcieni. `epd_fullclear` + GC16 = **126 przebiegów** przez wszystkie
+    /// bramki, ~0,9 s przy zegarze 20 MHz. Czyści duchy. Nigdy w środku interakcji.
     Full,
-    /// Szybkie, dwupoziomowe. ~0,2–0,35 s. Zostawia duchy, więc co N razy trzeba
-    /// wtrącić [`Refresh::Full`].
+    /// Szybkie, dwupoziomowe. MODE_DU to **5 faz**, ~35 ms — czyli o rząd wielkości
+    /// taniej niż `Full`, a nie „trochę". Zostawia duchy, więc co jakiś czas trzeba
+    /// wtrącić [`Refresh::Full`] — ale w przerwie, nie w rytmie naciśnięć.
     Fast,
 }
 
@@ -271,12 +273,32 @@ impl Epd {
         Ok(())
     }
 
-    /// Odświeża **sam wskazany prostokąt** panelu, w trybie DU.
+    /// Odświeża wskazany prostokąt panelu, w trybie DU.
     ///
-    /// Od tego zależy, czy dotknięcie przycisku daje natychmiastową odpowiedź.
-    /// Pełna klatka to 0,2–0,35 s nawet w DU, bo przebieg idzie przez wszystkie
-    /// 540 linii; obszar wielkości klawisza to ułamek tego czasu, bo `epd_draw_base`
-    /// dostaje krótszy zakres linii.
+    /// # Obszar NIE kupuje czasu na szkle — tylko czas procesora
+    ///
+    /// Wcześniej stało tu, że „obszar wielkości klawisza to ułamek czasu pełnej
+    /// klatki, bo `epd_draw_base` dostaje krótszy zakres linii". **To była nieprawda
+    /// i na tym nieporozumieniu stała cała konstrukcja odpowiedzi na dotyk.**
+    ///
+    /// `epd_draw_base` ustawia `render_context.lines_total = rounded_display_height()`
+    /// bezwarunkowo, a `render_lcd.c` linii spoza obszaru nie pomija — wypełnia jej
+    /// bufor zerami i i tak commituje. Bramki panelu są taktowane wszystkie, zawsze.
+    /// Czas przebiegu zależy więc wyłącznie od liczby faz waveformu:
+    ///
+    /// | tryb | fazy | czas |
+    /// |---|---|---|
+    /// | `MODE_DU` | 5 | ~35 ms |
+    /// | `MODE_GC16` | 30 | ~210 ms |
+    /// | `epd_fullclear` (GC16 + `epd_clear`) | 96 | ~680 ms |
+    ///
+    /// (Liczby dla zegara piksela 20 MHz, czyli przy `CONFIG_ESP32S3_DATA_CACHE_LINE_64B`.
+    /// Przy domyślnej linii cache'u 32 B epdiy PO CICHU połowi zegar do 10 MHz —
+    /// `lcd_driver.c:405-424` — i wszystkie powyższe czasy się podwajają.)
+    ///
+    /// Wniosek praktyczny: dzielenie zmiany na dwa wypchnięcia (mignięcie pod palcem,
+    /// a potem treść) **podwaja** czas, zamiast go skracać. Wolno to robić wyłącznie
+    /// tam, gdzie akcja sama z siebie nic na ekranie nie zmienia.
     ///
     /// `area` jest we współrzędnych **panelu** — przelicza je
     /// [`dashboard::Rotation::canvas_rect_to_panel`]. Prostokąt jest przycinany do

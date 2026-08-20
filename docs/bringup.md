@@ -47,6 +47,66 @@ boot do gotowości: 312 ms
 | `boot do gotowości > 600 ms` | pomiar 5: memtest PSRAM albo walidacja obrazu przy każdym wybudzeniu |
 | `boot #2` i dalej rosnące | pomiar 4: `.rtc.data` przeżywa deep sleep, linker nie wyciął sekcji |
 
+### Czas panelu: skąd wiadomo, ile naprawdę trwa klatka
+
+Nic tu nie trzeba mierzyć samemu — i firmware, i epdiy same się z tego spowiadają.
+
+**Pierwsze, czego szukać po starcie.** Jeśli w logu są trzy linie na czerwono:
+
+```
+E (...) epdiy: cache line size is set to 32 (< 64B)! This will degrade performance
+E (...) epdiy: If you are on arduino, you can't set this option yourself
+E (...) epdiy: Reducing the pixel clock from 20 MHz to 10 MHz for now!
+```
+
+to znaczy, że `CONFIG_ESP32S3_DATA_CACHE_LINE_64B` **nie weszło** i panel chodzi na
+połowie zegara — a wtedy każdy czas poniżej trzeba podwoić. Po poprawnym buildzie
+tych linii nie ma. Zmiana `sdkconfig.defaults` bywa cicho ignorowana przy przebudowie;
+jak ją wymusić, jest w [pułapkach buildu](#).
+
+**Ile trwa jedna klatka.** epdiy loguje rozbicie przy każdym częściowym odświeżeniu
+(`highlevel.c`, koniec `epd_hl_update_area`):
+
+```
+I (...) epdiy: mirror: 0ms, rot: 0ms, diff: 14ms, draw: 35ms, buffer update: 6ms
+```
+
+Interesuje `draw:` — to czysty czas na szkle. Podłoga wynika z arytmetyki i nie da
+się jej ominąć żadnym przycinaniem obszaru:
+
+| co | fazy | przy 20 MHz | przy 10 MHz |
+|---|---|---|---|
+| `MODE_DU` (`Refresh::Fast`, klawisz, strona) | 5 | ~35 ms | ~70 ms |
+| `MODE_GC16` | 30 | ~210 ms | ~420 ms |
+| `epd_fullclear` (GC16 + `epd_clear`) | 96 | ~680 ms | ~1,36 s |
+| `Refresh::Full` (fullclear + GC16) | 126 | ~890 ms | ~1,78 s |
+
+Wyprowadzenie: linia to `(960/4 + 4 + 4 - 1)` taktów zegara piksela, czyli 13 µs
+przy 20 MHz; klatka to 544 linie (`((540+7)/8)*8`), czyli ~7,1 ms; reszta to mnożenie
+przez liczbę faz z `waveforms/epdiy_ED047TC1.h`.
+
+**Jeśli `draw:` jest DWA razy większe niż tabela** przy potwierdzonym zegarze 20 MHz,
+to potwierdza podejrzenie błędu w samym epdiy: `lcd_isr_vsync` porównuje
+`lcd.batches >= batches_needed`, a `lcd.batches` startuje od zera — więc dla panelu
+poniżej `LINE_BATCH` (1000) linii pierwszy `VSYNC_END` nie kończy klatki i bramki są
+przelatywane drugi raz. Obejścia przez API nie ma; poprawka wymaga wzięcia epdiy do
+repo jako komponentu lokalnego.
+
+**Klatka od strony firmware'u.** Ekran konfiguracji wypisuje na każde wypchnięcie:
+
+```
+klatka: 58 ms (render 9 ms, panel 49 ms, 3 obszarów)
+```
+
+`render` to czysty CPU po stronie Rusta, `panel` to `pack4_rect` + różnica epdiy
++ przebieg. Jeden znak = **jedna** taka linia. Dwie linie na znak znaczą, że wróciła
+osobna klatka gasząca podświetlenie.
+
+**Czego NIE zobaczysz w logu:** czyszczenia duchów w rytmie pisania. `Refresh::Full`
+jest odłożone do przerwy dłuższej niż `FULL_AFTER_IDLE_MS` i wypisuje się wtedy jako
+`czyszczenie duchów w przerwie: N ms`. Jeśli ta linia pojawia się między znakami,
+próg jest za krótki.
+
 ### Kiedy urządzenie śpi — widać to na ekranie
 
 Przy `SLEEP_MARKER = true` (domyślnie, na czas bring-upu) urządzenie tuż przed
