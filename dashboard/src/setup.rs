@@ -138,7 +138,11 @@ impl Page {
     /// dosunięta do dolnej krawędzi, więc rośnie w górę.
     pub fn rows(self) -> &'static [&'static str] {
         match self {
-            Page::Letters => &["qwertyuiop", "asdfghjkl", "zxcvbnm"],
+            // Kropka, przecinek i ukośnik SĄ na stronie liter, choć powtarzają się
+            // na symbolach. Adres iCal to głównie one, a odsyłanie po każdy znak
+            // interpunkcyjny na drugą stronę zamienia wpisywanie adresu w mordęgę.
+            // Miejsce było: dolny wiersz miał siedem klawiszy przy dziesięciu w górnym.
+            Page::Letters => &["qwertyuiop", "asdfghjkl", "zxcvbnm.,/"],
             // Wiersz drugi to komplet znaków z adresu iCal Google; trzeci to reszta
             // tego, co trafia do haseł. Polskie znaki są na osobnym wierszu, bo
             // w SSID-ach się zdarzają, a bez nich nie byłoby ich jak wpisać w ogóle.
@@ -478,13 +482,39 @@ mod tests {
         }
     }
 
+    /// Znak wolno powielić na obu stronach **tylko wtedy, gdy jest na tej liście**.
+    ///
+    /// Reguła „żaden znak nie powtarza się" była tu od początku i jest dobra jako
+    /// obrona przed bałaganem, ale okazała się za sztywna w jednym miejscu: adres
+    /// iCal to głównie kropki i ukośniki, a odsyłanie po każdy z nich na stronę
+    /// symboli zamienia wpisywanie adresu w mordęgę. Zgłoszone ze sprzętu.
+    ///
+    /// Dlatego wyjątek jest JAWNY, a nie przez usunięcie testu: przypadkowy duplikat
+    /// nadal wywala build, świadomy trzeba dopisać tutaj razem z powodem.
+    const DOZWOLONE_DUPLIKATY: &[char] = &['.', ',', '/'];
+
     #[test]
-    fn zaden_znak_nie_powtarza_sie_na_klawiaturze() {
+    fn znaki_powtarzaja_sie_tylko_tam_gdzie_wolno() {
         let mut widziane = std::collections::BTreeSet::new();
+        let mut duplikaty = std::collections::BTreeSet::new();
         for row in Page::Letters.rows().iter().chain(Page::Symbols.rows()) {
             for ch in row.chars() {
-                assert!(widziane.insert(ch), "znak `{ch}` jest na dwóch klawiszach");
+                if !widziane.insert(ch) {
+                    assert!(
+                        DOZWOLONE_DUPLIKATY.contains(&ch),
+                        "znak `{ch}` jest na dwóch klawiszach, a nie ma go w DOZWOLONE_DUPLIKATY"
+                    );
+                    duplikaty.insert(ch);
+                }
             }
+        }
+        // Lista wyjątków ma opisywać rzeczywistość, a nie życzenia: znak, który
+        // przestał się powtarzać, ma z niej zniknąć.
+        for ch in DOZWOLONE_DUPLIKATY {
+            assert!(
+                duplikaty.contains(ch),
+                "`{ch}` jest w DOZWOLONE_DUPLIKATY, ale nie powtarza się — usuń go z listy"
+            );
         }
     }
 }

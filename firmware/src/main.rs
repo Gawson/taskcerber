@@ -190,9 +190,25 @@ fn run(mut state: RtcState) -> Result<u64> {
     let mut content_crc = state.last_content_crc;
     let mut fetched = false;
 
+    // Radio podnosimy dopiero wtedy, gdy naprawdę trzeba — i na czas bring-upu
+    // wyłącznie na kablu. Patrz [`RADIO_ONLY_ON_USB`].
+    let radio_allowed = !RADIO_ONLY_ON_USB || power_status.usb_present;
+
     if !config.is_provisioned() {
         warn!("urządzenie nieskonfigurowane — pokazuję ekran konfiguracji");
         net_state = NetState::NeedsAuth;
+    } else if !radio_allowed {
+        warn!(
+            "radio wstrzymane: RADIO_ONLY_ON_USB, a USB nieobecne (vbus={}, chrg={})",
+            power_status.vbus_stat, power_status.chrg_stat
+        );
+        if state.last_success_unix > 0 {
+            net_state = NetState::Stale {
+                since: unix_to_local(state.last_success_unix, home_tz).unwrap_or(now),
+            };
+        } else {
+            net_state = NetState::Offline;
+        }
     // Dotknięcie „odśwież" w poprzednim cyklu wymusza pobranie niezależnie od trybu,
     // także w nocy. Flagę zdejmujemy tutaj, a nie po udanym pobraniu: gdyby sieć
     // zawiodła, powtarzanie życzenia sprzed godziny nie jest już tym, o co ktoś prosił.
@@ -662,6 +678,31 @@ fn unix_to_local(unix: i64, tz: chrono_tz::Tz) -> Option<NaiveDateTime> {
     use chrono::TimeZone;
     tz.timestamp_opt(unix, 0).single().map(|d| d.naive_local())
 }
+
+/// Czy wolno podnieść radio wyłącznie przy podłączonym USB.
+///
+/// # Po co, i dlaczego akurat teraz
+///
+/// Rzecz na czas bring-upu, jak `SLEEP_MARKER`. Ścieżka sieciowa — WiFi, SNTP,
+/// HTTPS, parser iCal — **nigdy nie chodziła na sprzęcie**, a pierwsza próba
+/// zakończyła się tym, że urządzenie przestało dochodzić do ekranu.
+///
+/// Kluczowa obserwacja: dopóki brakowało adresu iCal, `Config::is_provisioned`
+/// zwracało fałsz i radio NIE WSTAWAŁO w ogóle. Śmierć zbiega się więc dokładnie
+/// z pierwszym w życiu tego urządzenia użyciem nadajnika — a nagłówek tego pliku
+/// ostrzega przed tym wprost: szczyt nadajnika to ~340 mA i na zużytym ogniwie
+/// przez LDO robi z tego brownout, czyli reset bez śladu na ekranie.
+///
+/// Ta stała odcina tę zmienną. Na kablu brownoutu być nie może, więc jeśli przy
+/// `true` ścieżka sieciowa przechodzi, przyczyną było zasilanie; jeśli nadal pada,
+/// przyczyna jest w kodzie i log wskaże gdzie. Bez tego rozdzielenia każdy kolejny
+/// pomiar miesza dwie rzeczy naraz.
+///
+/// Poza bring-upem to jest też sensowna reguła sama w sobie: polityka OTA już teraz
+/// traktuje nieznany stan ogniwa jak za mało energii (`Policy::should_ota`), a stan
+/// ogniwa na tym egzemplarzu JEST nieznany — BQ27220 nie był nigdy uruchomiony
+/// i `battery_percent` bywa `None`, co polityka trybu przepuszcza jak pełną baterię.
+const RADIO_ONLY_ON_USB: bool = true;
 
 /// Czy urządzenie ma zostawiać kontroler dotyku przy życiu na czas snu, żeby
 /// dotknięcie mogło je obudzić.

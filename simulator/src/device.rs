@@ -516,6 +516,97 @@ mod tests {
         );
     }
 
+    /// Przełączanie trybów klawiatury: `Aa` (wielkość liter) i `?123` (strona).
+    ///
+    /// Zgłoszone ze sprzętu: znaki wchodzą sprawnie, ale te dwa klawisze „nichuja".
+    /// Obie akcje idą inną ścieżką niż zwykły znak — zwracają `Applied::Relayout`,
+    /// czyli przebudowę CAŁEJ mapy dotykowej, a nie dopisanie znaku. Test sprawdza
+    /// to, co widać: po naciśnięciu układ ma się faktycznie zmienić.
+    #[test]
+    fn przelaczanie_trybow_klawiatury_zmienia_uklad() {
+        let mut dev = Device::new(model_z_wersja(), Rotation::Portrait);
+        let wejscie = dev
+            .screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::OpenSetup)
+            .expect("wejście do konfiguracji")
+            .rect;
+        dev.finish_refresh_for_test();
+        dev.touch(wejscie.x + wejscie.w / 2, wejscie.y + wejscie.h / 2);
+        assert!(dev.setup_open());
+
+        let znaki = |d: &Device| -> Vec<char> {
+            let mut v: Vec<char> = d
+                .screen
+                .hits
+                .iter()
+                .filter_map(|h| match h.action {
+                    Action::Key(c) => Some(c),
+                    _ => None,
+                })
+                .collect();
+            v.sort_unstable();
+            v
+        };
+
+        // --- ?123: inna strona klawiatury ---------------------------------
+        let litery = znaki(&dev);
+        let strona = dev
+            .screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::KeyPage)
+            .expect("klawisz zmiany strony")
+            .rect;
+        dev.finish_refresh_for_test();
+        assert_eq!(
+            dev.touch(strona.x + strona.w / 2, strona.y + strona.h / 2),
+            Some(Action::KeyPage)
+        );
+        dev.finish_refresh_for_test();
+        let symbole = znaki(&dev);
+        assert_ne!(
+            litery, symbole,
+            "po `?123` zestaw klawiszy MUSI się zmienić — inaczej przełączanie strony nic nie robi"
+        );
+
+        // --- Aa: wielkość liter -------------------------------------------
+        //
+        // Każde dotknięcie wymaga domkniętej klatki — panel celowo nie reaguje
+        // w trakcie odświeżania, pilnuje tego `panel_nie_reaguje_w_trakcie_odswiezania`.
+        dev.finish_refresh_for_test();
+        dev.touch(strona.x + strona.w / 2, strona.y + strona.h / 2);
+        dev.finish_refresh_for_test();
+
+        let caps = dev
+            .screen
+            .hits
+            .iter()
+            .find(|h| h.action == Action::Caps)
+            .expect("klawisz wielkości liter")
+            .rect;
+
+        // `Caps` nie zmienia ZESTAWU akcji — akcja niesie znak MAŁY, a wielkość
+        // rozstrzyga `Setup::apply`. Dowodem jest więc to, co NARYSOWANE: przy
+        // włączonym shifcie na klawiszach stoją wersaliki, a te mają inną ilość
+        // atramentu niż minuskuły.
+        let atrament = |d: &Device| d.pending.pixels().iter().filter(|&&p| p != 0xFF).count();
+        let przed = atrament(&dev);
+        assert!(przed > 0, "panel musi mieć narysowaną klawiaturę");
+
+        assert_eq!(
+            dev.touch(caps.x + caps.w / 2, caps.y + caps.h / 2),
+            Some(Action::Caps)
+        );
+        dev.finish_refresh_for_test();
+        assert_ne!(
+            przed,
+            atrament(&dev),
+            "`Aa` musi zmieniać to, co narysowane na klawiszach"
+        );
+    }
+
     /// Pełna droga tak, jak zrobi to firmware: dotknięcie otwiera konfigurację,
     /// stukanie w klawisze wpisuje znaki, „zapisz" wraca do agendy.
     #[test]
