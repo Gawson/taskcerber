@@ -32,34 +32,9 @@
 //! półtony mają dojść do panelu takie, jakie są. Wnioski wpisuje się potem do palety
 //! w `canvas`, a nie odwrotnie.
 
-use crate::canvas::{Gray8, Rect, BLACK, WHITE};
+use crate::canvas::{dither_rect, Gray8, Rect, BLACK, WHITE};
 use crate::shapes::{hline, stroke_round_rect};
 use crate::text::{Align, Fonts, Weight};
-
-/// Macierz Bayera 4×4, wartości 0-15.
-///
-/// Klasyczny rozkład uporządkowany: sąsiednie piksele dostają progi maksymalnie od
-/// siebie oddalone, więc wzór jest drobny i nie tworzy pasm. Przy szesnastu progach
-/// odwzorowuje dokładnie tyle gęstości, ile poziomów ma panel — co jest wygodne,
-/// bo pozwala porównać dither z półtonem **jeden do jednego**.
-const BAYER4: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
-
-/// Wypełnia prostokąt ditherem o gęstości `level`/16 czerni.
-///
-/// `level = 0` zostawia biel, `level = 16` daje pełną czerń.
-pub fn dither_rect(c: &mut Gray8, r: Rect, level: u8) {
-    for y in r.y..r.bottom() {
-        for x in r.x..r.right() {
-            let t = BAYER4[(y.rem_euclid(4)) as usize][(x.rem_euclid(4)) as usize];
-            c.set(x, y, if t < level { BLACK } else { WHITE });
-        }
-    }
-}
 
 /// Obrysowuje próbkę czarną kreską 1 px, żeby dało się ją znaleźć także wtedy,
 /// gdy jej wypełnienie jest bielą.

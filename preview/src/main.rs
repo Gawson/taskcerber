@@ -112,8 +112,11 @@ fn main() {
         };
         let render_us = started.elapsed().as_micros();
 
-        // Tak jak na panelu: 16 poziomów, nie 256.
-        canvas.quantize16();
+        // Tak jak na panelu: nie tylko 16 poziomów zamiast 256, ale i ZMIERZONA
+        // charakterystyka tego panelu. Sam  pokazywał równą skalę,
+        // której na szkle nie ma, i przez to zrzuty obiecywały kontrast, którego
+        // urządzenie nie dowozi. Patrz `Gray8::simulate_panel`.
+        canvas.simulate_panel();
 
         let path = format!("out/{name}{suffix}.png");
         write_png(&canvas, &path);

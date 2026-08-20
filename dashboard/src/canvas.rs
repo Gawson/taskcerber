@@ -143,14 +143,105 @@ const _: () = assert!(
     "w pionie wysokość panelu staje się szerokością płótna — też musi być parzysta"
 );
 
-/// Poziomy szarości, których panel faktycznie używa (16 stopni, co 17).
+// ---------------------------------------------------------------------------
+// Paleta — ZMIERZONA NA SZKLE, nie wyprowadzona z noty katalogowej
+// ---------------------------------------------------------------------------
+//
+// Panel deklaruje szesnaście poziomów. Karta tonów (`crate::testcard`, wgrana
+// 2026-08-20) pokazuje, że jako **kanał informacji** działa z tego najwyżej jedna
+// trzecia, a charakterystyka jest mocno przesunięta w stronę bieli:
+//
+//   poziom 0-3 (0x00-0x33)   atrament. Nadaje się na tekst, kreski i grafikę.
+//                            Poziom 4 (0x44) jest granicą — jeszcze się czyta,
+//                            ale już nie w cienkim kroju.
+//   poziom 5-8  (0x55-0x88)  tylko tła i plamy. Widać, że coś tam jest; nie da
+//                            się na tym postawić litery ani kreski 1 px.
+//   poziom 9    (0x99)       zewnętrzna granica. Czasem widać, czasem nie.
+//   poziom 10-15 (0xAA-0xFF) do olania. Sens mają WYŁĄCZNIE jako ogon
+//                            antyaliasingu albo w grafice o płynnym tonie —
+//                            nigdy jako samodzielny element interfejsu.
+//
+// Czyli z szesnastu deklarowanych poziomów użyteczna jest POŁOWA, a na tekst
+// i kreski — pierwsza ćwiartka.
+//
+// Poprzednia paleta była nazwana procentami jasności i to wprowadzało w błąd:
+// `GRAY_20` sugerowało „20% szarości, czyli prawie czarne", a na szkle wychodziła
+// z tego średnia szarość. `GRAY_50`, `GRAY_60` i `GRAY_80` były po prostu
+// NIEWIDOCZNE — a wisiały na nich pasek baterii, kropki stron, linie włosowe
+// i tytuły wydarzeń minionych. Nazwy mówią teraz, do czego wolno użyć, a nie ile
+// procent czerni to miało być.
+//
+// Jasne wypełnienia robi się [`dither_rect`], nie półtonem: dithering używa
+// wyłącznie czerni i bieli, czyli dwóch stanów, które waveform dowozi pewnie.
+// Przy tej samej gęstości wychodzi wyraźnie ciemniejszy i równiejszy od półtonu —
+// widać to na karcie gołym okiem, a przy odświeżeniu częściowym (MODE_DU, które
+// półtonów nie umie w ogóle) jest jedyną działającą opcją.
+
 pub const BLACK: u8 = 0x00;
-pub const GRAY_20: u8 = 0x33;
-pub const GRAY_40: u8 = 0x66;
-pub const GRAY_50: u8 = 0x80;
-pub const GRAY_60: u8 = 0x99;
-pub const GRAY_80: u8 = 0xCC;
+
+/// Atrament drugoplanowy. Poziom 2 — wyraźnie lżejszy od czerni, wciąż czytelny.
+pub const INK_DIM: u8 = 0x22;
+
+/// Granica czytelności. Poziom 3. Poniżej tego tekst przestaje być tekstem,
+/// a staje się tym, co użytkownik nazwał „artefaktem".
+pub const INK_FAINT: u8 = 0x33;
+
+/// Najciemniejsze wypełnienie, które nie udaje atramentu. Poziom 5.
+pub const FILL_DARK: u8 = 0x55;
+
+/// Wypełnienie średnie. Poziom 6.
+pub const FILL: u8 = 0x66;
+
+/// Najjaśniejsze wypełnienie, które jeszcze pewnie widać. Poziom 8.
+pub const FILL_LIGHT: u8 = 0x88;
+
+/// Powyżej tej wartości panel nie odróżnia niczego od bieli.
+///
+/// Pilnuje tego test `nic_czytelnego_nie_jest_jasniejsze_niz_granica`. Jeśli
+/// kiedykolwiek zajdzie potrzeba użycia wyższej wartości jako samodzielnego
+/// elementu — to znaczy, że element ma być ditherowany, nie rozjaśniony.
+pub const LIGHTEST_VISIBLE: u8 = 0x99;
+
 pub const WHITE: u8 = 0xFF;
+
+/// Jak szesnaście poziomów wygląda NA SZKLE — zmierzone ze zdjęć karty tonów.
+///
+/// Czytać tak: poziom 0 nie jest czernią, tylko ciemnym grafitem; od poziomu 10
+/// w górę wszystko jest bielą. Pomiędzy jest ściśnięta, wypukła krzywa — stąd
+/// wrażenie, że „szarości są w chuj blade".
+const PANEL_RESPONSE: [u8; 16] = [
+    0x18, 0x28, 0x40, 0x58, 0x70, 0x88, 0x9C, 0xB0, 0xC4, 0xD8, 0xEE, 0xF4, 0xF8, 0xFB, 0xFD, 0xFF,
+];
+
+/// Macierz Bayera 4×4, wartości 0-15.
+///
+/// Rozkład uporządkowany: sąsiednie piksele dostają progi maksymalnie od siebie
+/// oddalone, więc wzór jest drobny i nie tworzy pasm. Szesnaście progów odwzorowuje
+/// dokładnie tyle gęstości, ile poziomów deklaruje panel.
+const BAYER4: [[u8; 4]; 4] = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+];
+
+/// Wypełnia prostokąt ditherem o gęstości `level`/16 czerni.
+///
+/// **To jest właściwy sposób na jasne wypełnienie na tym panelu**, a nie półton.
+/// Dithering używa wyłącznie czerni i bieli — dwóch stanów, które waveform dowozi
+/// pewnie — więc przy tej samej gęstości wychodzi ciemniejszy i równiejszy niż
+/// prawdziwa szarość. Przy poziomach, na których półton jest już nieodróżnialny od
+/// bieli (2/16, 3/16), dither wciąż wyraźnie widać.
+///
+/// `level = 0` zostawia biel, `level = 16` daje pełną czerń.
+pub fn dither_rect(c: &mut Gray8, r: Rect, level: u8) {
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            let t = BAYER4[(y.rem_euclid(4)) as usize][(x.rem_euclid(4)) as usize];
+            c.set(x, y, if t < level { BLACK } else { WHITE });
+        }
+    }
+}
 
 /// Próg, przy którym [`Gray8::quantize2`] rozstrzyga czerń od bieli.
 ///
@@ -414,6 +505,26 @@ impl Gray8 {
         }
     }
 
+    /// Odwzorowuje płótno tak, **jak wygląda na szkle**, a nie jak wygląda w pliku.
+    ///
+    /// Do podglądu na hoście i do symulatora. Bez tego cała pętla „rysuj na
+    /// komputerze, patrz na PNG" kłamie w jedną, konkretną stronę: PNG pokazuje
+    /// równomierną skalę szesnastu szarości, a panel — skalę mocno przesuniętą ku
+    /// bieli, w której górna połowa poziomów w ogóle nie istnieje. Dokładnie na tym
+    /// polegli autorzy poprzedniej palety: `GRAY_50` wyglądało na zrzucie jak
+    /// porządna średnia szarość, a na urządzeniu było niewidoczne.
+    ///
+    /// Krzywa jest **zmierzona**, nie wyliczona: pochodzi ze zdjęć karty tonów
+    /// ([`crate::testcard`]) zrobionych 2026-08-20. Jest przybliżeniem — chodzi
+    /// o to, żeby zrzut przestał obiecywać kontrast, którego nie ma, a nie o
+    /// fotometrię. Jeśli kiedyś zmieni się waveform albo egzemplarz panelu, wgraj
+    /// kartę jeszcze raz i popraw tę tablicę.
+    pub fn simulate_panel(&mut self) {
+        for p in self.px.iter_mut() {
+            *p = PANEL_RESPONSE[(*p >> 4) as usize];
+        }
+    }
+
     /// Sprowadza płótno do DWÓCH poziomów — czerni i bieli.
     ///
     /// # Dlaczego półtony na tym urządzeniu są kłamstwem
@@ -472,6 +583,44 @@ impl Gray8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paleta_miesci_sie_w_zmierzonym_zakresie() {
+        // Reguła z karty tonów: atrament tylko w poziomach 0-3, wypełnienia do 8,
+        // poziom 9 to zewnętrzna granica. Cokolwiek jaśniejszego jest bielą i nie
+        // wolno tego użyć jako samodzielnego elementu.
+        for (nazwa, v) in [("INK_DIM", INK_DIM), ("INK_FAINT", INK_FAINT)] {
+            assert!(v >> 4 <= 3, "{nazwa} = {v:#04X} jest poza zakresem atramentu");
+        }
+        for (nazwa, v) in [("FILL_DARK", FILL_DARK), ("FILL", FILL), ("FILL_LIGHT", FILL_LIGHT)] {
+            let poziom = v >> 4;
+            assert!(
+                (4..=8).contains(&poziom),
+                "{nazwa} = {v:#04X} jest poza zakresem wypełnień"
+            );
+        }
+        assert!(LIGHTEST_VISIBLE >> 4 <= 9, "granica widoczności przesunięta za wysoko");
+    }
+
+    #[test]
+    fn krzywa_panelu_jest_monotoniczna_i_saturuje_do_bieli() {
+        for i in 1..16 {
+            assert!(
+                PANEL_RESPONSE[i] > PANEL_RESPONSE[i - 1],
+                "krzywa panelu nie rośnie na poziomie {i}"
+            );
+        }
+        assert_eq!(PANEL_RESPONSE[15], WHITE, "poziom 15 musi być bielą");
+        assert!(
+            PANEL_RESPONSE[0] > BLACK,
+            "poziom 0 na tym panelu NIE jest czernią — to ciemny grafit i tak ma zostać"
+        );
+        // Sedno pomiaru: od poziomu 10 w górę nie ma już czego odróżniać.
+        assert!(
+            PANEL_RESPONSE[10] > 0xE0,
+            "poziom 10 miał być praktycznie bielą"
+        );
+    }
 
     const ORIENTACJE: [Rotation; 2] = [Rotation::Landscape, Rotation::Portrait];
 

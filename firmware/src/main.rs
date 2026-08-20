@@ -1426,7 +1426,7 @@ fn repaint_setup(
 /// Dopóki to nie jest zmierzone, każdy wybór odcienia w `dashboard::layout` jest
 /// zgadywaniem — a objawy („elementy blade jak artefakty") wskazują, że zgadywanie
 /// wyszło źle. Po odczytaniu karty przestawić na `false`.
-const GRAY_TEST_CARD: bool = true;
+const GRAY_TEST_CARD: bool = false;
 
 /// Jak długo urządzenie śpi po wyrysowaniu karty.
 ///

@@ -12,7 +12,7 @@
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::canvas::{Gray8, Rect, BLACK, GRAY_20, GRAY_40, GRAY_50, GRAY_60, GRAY_80, WHITE};
+use crate::canvas::{dither_rect, Gray8, Rect, BLACK, FILL_DARK, INK_DIM, INK_FAINT, WHITE};
 use crate::hit::{Action, HitRegion, Screen};
 use crate::model::{
     data_dzien_miesiac, dzien_skrot, godzina, naglowek_dnia, za_ile, Battery, CalEvent, Model,
@@ -82,18 +82,24 @@ impl Geom {
 // Typografia na e-papierze: dolna granica jest twarda
 // ---------------------------------------------------------------------------
 // Panel ma 4.7" i 960×540, czyli ~234 DPI — ale to nie jest gęstość LCD, tylko
-// elektroforetyczna zawiesina z waveformem o 16 poziomach, z których ciemne są
-// słabo rozróżnialne. Cienki krój w małym rozmiarze nie wychodzi „drobny", tylko
-// **poszczerbiony**: część kresek nie dostaje pełnego przebiegu i znika.
+// elektroforetyczna zawiesina. Cienki krój w małym rozmiarze nie wychodzi
+// „drobny", tylko **poszczerbiony**: część kresek nie dostaje pełnego przebiegu
+// i znika.
 //
-// Stąd dwie reguły, sprawdzone na sztuce:
+// Stąd trzy reguły, sprawdzone na sztuce:
 //
 //   1. Nic poniżej 19 px. Cokolwiek mniejszego jest do odczytania wyłącznie z nosem
 //      przy szkle i wygląda na uszkodzone.
 //   2. Poniżej ~26 px krój ma być `Medium` albo `Bold`, nigdy `Regular` — grubsza
 //      kreska nadrabia to, czego panel nie utrzymuje.
-//   3. Tekst jest czarny albo `GRAY_20`. Jaśniejsze szarości zostają dla linii
-//      i wypełnień; na literach dają dokładnie ten efekt poszczerbienia.
+//   3. **Tekst wyłącznie w poziomach 0-3**, czyli `BLACK`, `INK_DIM`, `INK_FAINT`.
+//      To nie jest preferencja estetyczna, tylko wynik pomiaru z karty tonów: od
+//      poziomu 5 w górę litera przestaje być literą, a od 10 nie ma jej wcale.
+//      Cała mechanika i krzywa odpowiedzi — przy palecie w `canvas`.
+//
+// Konsekwencja, z której trzeba sobie zdawać sprawę projektując: **ton jest tu
+// kanałem o czterech stopniach, nie o szesnastu.** Hierarchię niosą rozmiar
+// i grubość kroju; jasne wypełnienia robi `dither_rect`, nie szarość.
 const STATUS_SIZE: f32 = 25.0;
 const STATUS_PAD: i32 = 10;
 const STATUS_PILL_TOP: i32 = 66;
@@ -281,14 +287,14 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         82.0,
         26.0,
         Weight::Medium,
-        GRAY_20,
+        INK_DIM,
         Align::Left,
     );
 
     draw_battery(&model.battery, fonts, c, g.w - g.margin - 92, 30);
 
     let (status_text, status_ink) = match model.net {
-        NetState::Ok => (format!("zaktualizowano {}", godzina(model.now)), GRAY_40),
+        NetState::Ok => (format!("zaktualizowano {}", godzina(model.now)), INK_DIM),
         NetState::Stale { since } => (format!("nieaktualne od {}", godzina(since)), BLACK),
         NetState::Offline => ("brak sieci".to_string(), BLACK),
         NetState::NeedsAuth => ("skonfiguruj urządzenie".to_string(), BLACK),
@@ -351,7 +357,7 @@ fn draw_battery(b: &Battery, fonts: &Fonts, c: &mut Gray8, x: i32, y: i32) {
         let inner = body.inset(5);
         let w = (inner.w as f32 * (pct as f32 / 100.0)).round() as i32;
         if w > 0 {
-            let ink = if pct <= 15 { BLACK } else { GRAY_50 };
+            let ink = if pct <= 15 { BLACK } else { FILL_DARK };
             fill_round_rect(c, Rect::new(inner.x, inner.y, w, inner.h), 2.0, ink);
         }
         fonts.draw(
@@ -480,7 +486,7 @@ fn draw_day_header(
         baseline,
         22.0,
         Weight::Regular,
-        GRAY_50,
+        INK_DIM,
         Align::Left,
     );
 
@@ -488,7 +494,7 @@ fn draw_day_header(
     let line_x = g.margin + (label_w + sub_w) as i32 + 30;
     let line_w = g.w - g.margin - line_x;
     if line_w > 20 {
-        hline(c, line_x, y + 14, line_w, 1, GRAY_80);
+        hline(c, line_x, y + 14, line_w, 1, INK_DIM);
     }
 
     y + DAY_HEADER_H
@@ -500,15 +506,16 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
     let past = event.is_past(now);
     let live = event.is_now(now);
 
-    let title_ink = if past { GRAY_50 } else { BLACK };
-    let time_ink = if past { GRAY_60 } else { BLACK };
+    let title_ink = if past { INK_FAINT } else { BLACK };
+    let time_ink = if past { INK_FAINT } else { BLACK };
 
     if live {
-        fill_round_rect(
+        // Ditherem, nie półtonem. Poprzednie `0xF2` to poziom 15 — na szkle
+        // czysta biel, czyli podświetlenie „dzieje się teraz" nie istniało.
+        dither_rect(
             c,
             Rect::new(g.margin - 10, y - 4, g.w - 2 * g.margin + 20, h - 2),
-            8.0,
-            0xF2,
+            2,
         );
         fill_round_rect(c, Rect::new(g.margin - 10, y - 4, 5, h - 2), 2.5, BLACK);
     }
@@ -545,7 +552,7 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
             baseline + 20.0,
             20.0,
             Weight::Medium,
-            GRAY_20,
+            INK_DIM,
             Align::Left,
         );
     }
@@ -562,7 +569,7 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
             c,
             Rect::new(dot_x as i32 - 4, dot_y as i32 - 4, 9, 9),
             1.5,
-            GRAY_50,
+            BLACK,
         ),
     }
 
@@ -608,7 +615,7 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
             baseline + 22.0,
             21.0,
             Weight::Medium,
-            GRAY_20,
+            INK_DIM,
             Align::Left,
         );
     }
@@ -666,7 +673,7 @@ fn draw_setup_cta(fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
         (rect.bottom() + 40) as f32,
         24.0,
         Weight::Medium,
-        GRAY_20,
+        INK_DIM,
         Align::Center,
     );
 
@@ -684,7 +691,7 @@ fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
         cy,
         42.0,
         Weight::Bold,
-        GRAY_20,
+        INK_DIM,
         Align::Center,
     );
     fonts.draw(
@@ -694,7 +701,7 @@ fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
         cy + 36.0,
         24.0,
         Weight::Medium,
-        GRAY_20,
+        INK_DIM,
         Align::Center,
     );
 }
@@ -739,7 +746,7 @@ fn draw_event_detail(
         y as f32,
         24.0,
         Weight::Medium,
-        GRAY_40,
+        INK_DIM,
         Align::Left,
     );
     y += 46;
@@ -770,7 +777,7 @@ fn draw_event_detail(
                 y as f32,
                 26.0,
                 Weight::Regular,
-                GRAY_40,
+                INK_DIM,
                 Align::Left,
             );
             y += 32;
@@ -798,7 +805,7 @@ fn draw_event_detail(
             y as f32,
             24.0,
             Weight::Medium,
-            GRAY_20,
+            INK_DIM,
             Align::Left,
         );
     }
@@ -842,7 +849,7 @@ fn draw_event_detail(
 fn draw_footer(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
     let g = Geom::of(c);
     let top = g.h - g.footer_h;
-    hline(c, g.margin, top, g.w - 2 * g.margin, 1, GRAY_80);
+    hline(c, g.margin, top, g.w - 2 * g.margin, 1, INK_DIM);
 
     // Paginacja ma pierwszeństwo przed kafelkami — na stronie 2 z 3 to ważniejsze
     // niż pogoda.
@@ -863,7 +870,7 @@ fn draw_footer(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
             (g.h - 8) as f32,
             19.0,
             Weight::Medium,
-            GRAY_20,
+            INK_DIM,
             Align::Left,
         );
 
@@ -930,7 +937,7 @@ fn draw_pager(model: &Model, screen: &mut Screen, fonts: &Fonts, c: &mut Gray8, 
         if i == screen.page {
             fill_circle(c, cx, cy, 6.0, BLACK);
         } else {
-            fill_circle(c, cx, cy, 5.0, GRAY_80);
+            fill_circle(c, cx, cy, 5.0, BLACK);
             fill_circle(c, cx, cy, 3.0, WHITE);
         }
     }
@@ -943,7 +950,7 @@ fn draw_pager(model: &Model, screen: &mut Screen, fonts: &Fonts, c: &mut Gray8, 
         (top + g.footer_h - 14) as f32,
         20.0,
         Weight::Medium,
-        GRAY_40,
+        INK_DIM,
         Align::Center,
     );
 
@@ -968,7 +975,7 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
             (top + 30) as f32,
             20.0,
             Weight::Medium,
-            GRAY_20,
+            INK_DIM,
             Align::Left,
         );
 
@@ -1007,7 +1014,7 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
                 (top + 64) as f32,
                 (size * 0.62).max(12.0),
                 Weight::Regular,
-                GRAY_40,
+                INK_DIM,
                 Align::Left,
             );
         }
@@ -1203,7 +1210,7 @@ fn draw_setup_head(
     let status_size = if g.compact { 18.0 } else { 20.0 };
     let (status, ink) = match setup.first_missing() {
         Some(field) => (format!("brakuje: {}", field.tab()), BLACK),
-        None => ("komplet — naciśnij zapisz".to_string(), GRAY_20),
+        None => ("komplet — naciśnij zapisz".to_string(), INK_DIM),
     };
     fonts.draw(
         c,
@@ -1280,7 +1287,7 @@ fn draw_edit_field(
         g.label_base,
         if g.compact { 20.0 } else { 24.0 },
         Weight::Medium,
-        GRAY_20,
+        INK_DIM,
         Align::Left,
     );
 
@@ -1333,7 +1340,7 @@ fn draw_edit_field(
         g.hint_base,
         hint_size,
         Weight::Regular,
-        GRAY_20,
+        INK_DIM,
         Align::Left,
     );
 }
@@ -1432,10 +1439,10 @@ fn draw_setup_summary(
         (top + 12) as f32,
         19.0,
         Weight::Medium,
-        GRAY_20,
+        INK_DIM,
         Align::Left,
     );
-    hline(c, m, top + HEAD_H - 6, g.w - 2 * m, 1, GRAY_40);
+    hline(c, m, top + HEAD_H - 6, g.w - 2 * m, 1, INK_DIM);
 
     for (i, field) in Field::ALL.into_iter().enumerate() {
         let y = top + HEAD_H + i as i32 * row_h;
@@ -1454,7 +1461,7 @@ fn draw_setup_summary(
             baseline,
             20.0,
             weight,
-            if active { BLACK } else { GRAY_20 },
+            if active { BLACK } else { INK_DIM },
             Align::Left,
         );
 
@@ -1622,7 +1629,7 @@ fn draw_keyboard_filtered(
 
 fn draw_key(fonts: &Fonts, c: &mut Gray8, r: Rect, label: &str, size: f32, style: KeyStyle) {
     match style {
-        // Ramka klawisza MUSI być czarna. Przy `GRAY_40` (0x66) klawiatura była
+        // Ramka klawisza MUSI być czarna. Przy `INK_DIM` (0x66) klawiatura była
         // ledwo widoczna: panel słabo rozróżnia jasne półtony, a `MODE_DU` — czyli
         // każde odświeżenie w oknie interaktywnym — jest dwupoziomowy i tak czy owak
         // sprowadza szarość do bieli albo czerni. Objawiało się to tym, że klawisz
