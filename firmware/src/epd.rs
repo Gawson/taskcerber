@@ -57,37 +57,17 @@ use crate::i2c::I2cBus;
 /// ~1,8 s zamiast ~0,9.
 const PANEL_BUS_MHZ: Option<i32> = None;
 
-/// Czy domykać pełne odświeżenie pełnoekranowym przebiegiem DU.
+/// Czy pełne odświeżenie ma iść przez CZERŃ zamiast przez `epd_fullclear`.
 ///
-/// # Problem, który to ma rozwiązać
+/// Pełne uzasadnienie przy [`Epd::flash_to_black`]. W skrócie: `epd_fullclear`
+/// zostawia tło na bieli z surowych pchnięć, a treść dostaje prawdziwy przebieg
+/// GC16 — i te dwie biele różnią się na tyle, że widać prostokąt obejmujący
+/// narysowane elementy. Przejście przez czerń sprawia, że różnicą jest KAŻDY
+/// piksel, więc cały ekran dostaje ten sam przebieg.
 ///
-/// Na panelu widać jaśniejsze prostokąty **dokładnie tam, gdzie wcześniej robiono
-/// odświeżenia częściowe**, i są odrobinę większe od samych obiektów — bo
-/// [`clamp_area`] wyrównuje wypychany prostokąt do ośmiu pikseli, a [`hull_of`]
-/// bierze otoczkę wszystkich obszarów. To nie są pasy ani duchy: to **mapa
-/// historii odświeżeń**.
-///
-/// Mechanizm: `MODE_DU` dowozi piksel do szyny, `MODE_GC16` układa go
-/// w szesnastopoziomowej skali i jego biel jest odrobinę ciemniejsza. Obszar, który
-/// dostał kiedyś impuls DU, zostaje więc bielszy od reszty — a epdiy nie ma jak tego
-/// wyrównać, bo pulsuje wyłącznie piksele, które się zmieniły.
-///
-/// # Dlaczego akurat tak
-///
-/// Nie da się „dopchnąć" bieli do szyny jednym wywołaniem, bo przy zerowej różnicy
-/// epdiy nie wysyła nic. Ale da się wymusić, żeby KAŻDY piksel przeszedł przez DU:
-/// zaraz po wyczyszczeniu przepuścić cały ekran przez czerń i z powrotem przez biel.
-/// Dwa przebiegi po ~35 ms, każdy piksel zmienia się w obie strony, więc cała
-/// powierzchnia kończy na poziomie ustalonym przez DU — czyli tam, gdzie ląduje
-/// każde późniejsze odświeżenie częściowe. Mapa historii nie ma wtedy z czego powstać.
-///
-/// Robi się to **przed** narysowaniem treści, i to jest istotne: DU jest
-/// dwupoziomowy, więc puszczony po treści przepisałby ją i skasował szarości.
-///
-/// Kosztuje ~70 ms doklejone do odświeżenia, które i tak trwa ~0,9 s, plus jedno
-/// mignięcie czernią — czyli dokładnie to, co robi każdy czytnik przy pełnym
-/// odświeżeniu. Jeśli nie pomoże, wyłączyć i szukać przy VCOM-ie.
-const FINISH_FULL_WITH_DU: bool = true;
+/// Przy okazji jest to 35 przelotów przez bramki zamiast 126 i jedno mignięcie
+/// zamiast pięciu. `false` wraca do starej drogi, gdyby trzeba było porównać.
+const FULL_VIA_BLACK: bool = true;
 
 /// Do ilu pikseli wyrównujemy obszar częściowego odświeżenia. Patrz
 /// [`Epd::present_area`].
@@ -337,16 +317,13 @@ impl Epd {
         self.power_on();
 
         if mode == Refresh::Full {
-            // SAFETY: epdiy zainicjalizowane, szyny podniesione. Ścieżka pustej różnicy
-            // (front == back == biel) zwraca EPD_DRAW_SUCCESS, więc wewnętrzny assert
-            // w epd_fullclear nie ma jak strzelić.
-            unsafe { sys::epd_fullclear(&mut self.hl, temperature_c) };
-
-            // Wyrównanie bieli PRZED narysowaniem treści — patrz [`FINISH_FULL_WITH_DU`].
-            // Kolejność jest tu wszystkim: gdyby zrobić to po, dwupoziomowy DU
-            // przepisałby całą treść i skasował szarości.
-            if FINISH_FULL_WITH_DU {
-                self.normalize_white(temperature_c);
+            if FULL_VIA_BLACK {
+                self.flash_to_black(temperature_c);
+            } else {
+                // Stara droga, zostawiona do porównania. SAFETY: epdiy zainicjalizowane,
+                // szyny podniesione. Ścieżka pustej różnicy (front == back == biel)
+                // zwraca EPD_DRAW_SUCCESS, więc assert w epd_fullclear nie strzeli.
+                unsafe { sys::epd_fullclear(&mut self.hl, temperature_c) };
             }
         }
 
@@ -373,35 +350,52 @@ impl Epd {
         Ok(())
     }
 
-    /// Przepędza CAŁY ekran przez DU — czerń, potem biel — zanim padnie na niego treść.
+    /// Zagania cały panel do CZERNI i zostawia `back_fb` czarny.
     ///
-    /// Sedno jest w tym, że epdiy pulsuje wyłącznie piksele, które się zmieniły.
-    /// Wypchnięcie bieli na biały ekran nie robi więc nic. Dopiero przejście przez
-    /// czerń zmienia każdy piksel, a powrót do bieli zmienia go jeszcze raz — i po
-    /// dwóch przebiegach cała powierzchnia leży na poziomie ustalonym przez DU,
-    /// czyli tam, gdzie ląduje każde późniejsze odświeżenie częściowe.
+    /// # To jest sedno jednorodności tła
     ///
-    /// Wołane zaraz po `epd_fullclear`, kiedy `back_fb` jest bielą, i **przed**
-    /// narysowaniem treści. Po nim `back_fb` znowu jest bielą, więc następujący GC16
-    /// widzi dokładnie tę samą różnicę, co zwykle, i szarości wychodzą nietknięte.
+    /// epdiy rysuje wyłącznie RÓŻNICĘ i wyłącznie na obszarze
+    /// `dirty_lines x dirty_columns`. Przy czystym, białym `back_fb` różnicą jest sama
+    /// treść — więc prawdziwy przebieg GC16 dostaje tylko prostokąt obejmujący to, co
+    /// narysowane, a nie cały ekran. Reszta powierzchni zostaje na tym, co zostawiły
+    /// surowe pchnięcia z `epd_clear()`, i **to jest inna biel**.
     ///
-    /// Wołane przy podniesionych szynach, bez własnego `power_on`/`power_off`.
-    /// Błędy tylko logujemy: to wyrównanie kosmetyczne i nie ma powodu, żeby przez
-    /// nie przewracać odświeżenia, które poza tym się udaje.
-    fn normalize_white(&mut self, temperature_c: i32) {
+    /// Widać to na sztuce dokładnie tak: jaśniejsze tło pokrywa się z wierszami tekstu
+    /// i sięga w poziomie od najbardziej wysuniętego w lewo elementu do najbardziej
+    /// wysuniętego w prawo — bo `dirty_columns` jest sumą po całym ekranie. Wnętrze
+    /// przycisku wewnątrz tego prostokąta też jest bielsze od marginesu obok.
+    ///
+    /// Lekarstwem nie jest wyrównywanie bieli przed rysowaniem — próbowaliśmy, i to
+    /// tylko przesunęło problem. Lekarstwem jest **zmusić GC16, żeby objął wszystko**:
+    /// jeśli przed narysowaniem treści panel i `back_fb` są CZARNE, to każdy piksel
+    /// bez wyjątku jest różnicą, każdy dostaje ten sam przebieg i cała powierzchnia
+    /// kończy na tej samej bieli.
+    ///
+    /// # Przy okazji: trzy razy szybciej i jedno mignięcie zamiast pięciu
+    ///
+    /// To zastępuje całe `epd_fullclear`, czyli 30 klatek GC16 na biel plus 66 surowych
+    /// pchnięć `epd_clear()` (trzy cykle po dziesięć klatek czerni i dwanaście bieli —
+    /// stąd te trzy mignięcia). Zamiast 126 przelotów przez bramki robimy 35:
+    /// pięć klatek DU na czerń i trzydzieści GC16 na treść. ~250 ms zamiast ~890 ms
+    /// i jedno przejście przez czerń, czyli dokładnie tyle, ile pokazuje każdy czytnik.
+    ///
+    /// Usuwanie duchów zostaje: przejście przez pełną czerń i dopiero stamtąd GC16 do
+    /// wartości docelowej to klasyczna sekwencja odświeżająca, nie skrót.
+    ///
+    /// Wołane przy podniesionych szynach. Błąd tylko logujemy — kolejny krok i tak
+    /// narysuje treść, najwyżej na gorszym tle.
+    fn flash_to_black(&mut self, temperature_c: i32) {
         let started = std::time::Instant::now();
-        for (level, etap) in [(0x00u8, "czerń"), (0xFF, "biel")] {
-            self.framebuffer().fill(level);
-            // SAFETY: epdiy zainicjalizowane, szyny podniesione, bufor jego własny.
-            let r = unsafe {
-                sys::epd_hl_update_screen(&mut self.hl, sys::EpdDrawMode_MODE_DU, temperature_c)
-            };
-            if r != sys::EpdDrawError_EPD_DRAW_SUCCESS {
-                log::warn!("wyrównanie bieli: {etap} zwróciła błąd {r}");
-                return;
-            }
+        self.framebuffer().fill(0x00);
+        // SAFETY: epdiy zainicjalizowane, szyny podniesione, bufor jego własny.
+        let r = unsafe {
+            sys::epd_hl_update_screen(&mut self.hl, sys::EpdDrawMode_MODE_DU, temperature_c)
+        };
+        if r != sys::EpdDrawError_EPD_DRAW_SUCCESS {
+            log::warn!("zaczernienie przed pełnym odświeżeniem zwróciło błąd {r}");
+            return;
         }
-        log::info!("wyrównanie bieli: {} ms", started.elapsed().as_millis());
+        log::info!("zaczernienie: {} ms", started.elapsed().as_millis());
     }
 
     /// Odświeża wskazany prostokąt panelu, w trybie DU.
