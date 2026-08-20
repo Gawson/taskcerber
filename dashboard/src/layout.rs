@@ -804,6 +804,56 @@ fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
     );
 }
 
+/// Ekran potwierdzenia po zapisaniu konfiguracji.
+///
+/// # Po co osobny ekran
+///
+/// Po naciśnięciu „zapisz" urządzenie ma już komplet danych, ale jeszcze ŻADNEJ
+/// treści — zasypia na kilka sekund i dopiero po przebudzeniu sięga po kalendarz.
+/// Nie da się w tym momencie pokazać ani agendy (byłoby „Nic w planie", czyli
+/// nieprawda), ani ekranu startowego (wyglądałby, jakby zapis nie przeszedł).
+///
+/// Wcześniej nie pokazywano nic: `setup_screen` wracał, a wołający wypychał tylko
+/// znacznik snu — kwadracik 22 px w rogu. Na szkle zostawała ta sama klawiatura,
+/// więc **naciśnięcie „zapisz" było wizualnie nieodróżnialne od braku reakcji**.
+pub fn render_saved(fonts: &Fonts, c: &mut Gray8) -> Screen {
+    c.clear(WHITE);
+    let g = Geom::of(c);
+    let cx = g.w as f32 / 2.0;
+    let cy = ((g.content_top + g.content_bottom) / 2) as f32;
+
+    fonts.draw(
+        c,
+        "Zapisano",
+        cx,
+        cy,
+        TEXT_TITLE,
+        Weight::Bold,
+        BLACK,
+        Align::Center,
+    );
+    // Dwie linie, nie jedna: w pionie zostaje 468 px szerokości, a cały komunikat
+    // jednym ciągiem wymagałby zejścia poniżej `TEXT_LEAD`.
+    for (i, line) in ["pobieram kalendarz", "przy najbliższym połączeniu"]
+        .iter()
+        .enumerate()
+    {
+        fonts.draw(
+            c,
+            line,
+            cx,
+            cy + 44.0 + i as f32 * 34.0,
+            TEXT_LEAD,
+            Weight::Medium,
+            INK_DIM,
+            Align::Center,
+        );
+    }
+
+    c.quantize_ink();
+    Screen::default()
+}
+
 // ---------------------------------------------------------------------------
 // Widok szczegółów wydarzenia
 // ---------------------------------------------------------------------------

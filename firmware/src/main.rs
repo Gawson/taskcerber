@@ -980,10 +980,18 @@ fn interactive_loop(
         match action {
             Action::OpenSetup => {
                 if setup_screen(epd, reader, store, state, temperature_c, rotation) {
-                    // Po zapisie nie ma na co czekać: ekran pod spodem pokazuje stan
-                    // sprzed konfiguracji, a prawdziwa treść wymaga sięgnięcia po sieć,
-                    // czyli osobnego wybudzenia. Wychodzimy od razu, zamiast trzymać
-                    // urządzenie na jawie przez pełne okno bezczynności.
+                    // Po zapisie nie ma na co czekać — prawdziwa treść wymaga sięgnięcia
+                    // po sieć, czyli osobnego wybudzenia. Ale WYJŚCIE BEZ SŁOWA było
+                    // błędem: na szkle zostawała klawiatura, bo `mark_going_to_sleep`
+                    // wypycha sam kwadracik w rogu. Naciśnięcie „zapisz" wyglądało
+                    // dokładnie tak samo jak brak reakcji.
+                    let fonts = Fonts::embedded();
+                    let mut done = Gray8::new(rotation);
+                    dashboard::render_saved(&fonts, &mut done);
+                    if let Err(e) = epd.present(&done, Refresh::Full, temperature_c) {
+                        error!("nie mogę pokazać potwierdzenia zapisu: {e:#}");
+                    }
+                    canvas = done;
                     mark_going_to_sleep(epd, &mut canvas, rotation, temperature_c);
                     return true;
                 }
