@@ -1130,7 +1130,13 @@ fn interactive_loop(
                 rotation,
                 Refresh::Full,
                 &mut panel_synced,
+                (canvas, screen),
             );
+            // Liczba stron zależy od orientacji: te same wydarzenia dają 5 stron
+            // w pionie i 12 w poziomie. Bez tego klamrowania `model.page` zostaje
+            // poza zakresem i kolejne stuknięcia „wstecz" nic nie robią, płacąc
+            // za każdym razem pełnym odświeżeniem.
+            model.page = model.page.min(screen.pages.saturating_sub(1));
             deadline = Instant::now() + Duration::from_millis(window_ms);
             continue;
         }
@@ -1231,7 +1237,13 @@ fn interactive_loop(
                     rotation,
                     Refresh::Full,
                     &mut panel_synced,
+                    (canvas, screen),
                 );
+                // Liczba stron zależy od orientacji: te same wydarzenia dają 5 stron
+                // w pionie i 12 w poziomie. Bez tego klamrowania `model.page` zostaje
+                // poza zakresem i kolejne stuknięcia „wstecz" nic nie robią, płacąc
+                // za każdym razem pełnym odświeżeniem.
+                model.page = model.page.min(screen.pages.saturating_sub(1));
                 repainted = true;
             }
             Action::NextPage => {
@@ -1244,7 +1256,13 @@ fn interactive_loop(
                     rotation,
                     Refresh::Full,
                     &mut panel_synced,
+                    (canvas, screen),
                 );
+                // Liczba stron zależy od orientacji: te same wydarzenia dają 5 stron
+                // w pionie i 12 w poziomie. Bez tego klamrowania `model.page` zostaje
+                // poza zakresem i kolejne stuknięcia „wstecz" nic nie robią, płacąc
+                // za każdym razem pełnym odświeżeniem.
+                model.page = model.page.min(screen.pages.saturating_sub(1));
                 repainted = true;
             }
             Action::PrevPage => {
@@ -1257,7 +1275,13 @@ fn interactive_loop(
                     rotation,
                     Refresh::Full,
                     &mut panel_synced,
+                    (canvas, screen),
                 );
+                // Liczba stron zależy od orientacji: te same wydarzenia dają 5 stron
+                // w pionie i 12 w poziomie. Bez tego klamrowania `model.page` zostaje
+                // poza zakresem i kolejne stuknięcia „wstecz" nic nie robią, płacąc
+                // za każdym razem pełnym odświeżeniem.
+                model.page = model.page.min(screen.pages.saturating_sub(1));
                 repainted = true;
             }
             Action::ShowEvent(i) => {
@@ -1270,7 +1294,13 @@ fn interactive_loop(
                     rotation,
                     Refresh::Full,
                     &mut panel_synced,
+                    (canvas, screen),
                 );
+                // Liczba stron zależy od orientacji: te same wydarzenia dają 5 stron
+                // w pionie i 12 w poziomie. Bez tego klamrowania `model.page` zostaje
+                // poza zakresem i kolejne stuknięcia „wstecz" nic nie robią, płacąc
+                // za każdym razem pełnym odświeżeniem.
+                model.page = model.page.min(screen.pages.saturating_sub(1));
                 repainted = true;
             }
             Action::Back => {
@@ -1283,7 +1313,13 @@ fn interactive_loop(
                         rotation,
                         Refresh::Full,
                         &mut panel_synced,
+                        (canvas, screen),
                     );
+                    // Liczba stron zależy od orientacji: te same wydarzenia dają 5 stron
+                    // w pionie i 12 w poziomie. Bez tego klamrowania `model.page` zostaje
+                    // poza zakresem i kolejne stuknięcia „wstecz" nic nie robią, płacąc
+                    // za każdym razem pełnym odświeżeniem.
+                    model.page = model.page.min(screen.pages.saturating_sub(1));
                     repainted = true;
                 }
             }
@@ -1637,6 +1673,8 @@ fn repaint(
     rotation: Rotation,
     mode: Refresh,
     synced: &mut bool,
+    // Klatka, która JEST na szkle. Zwracana bez zmian, gdy wypchnięcie zawiedzie.
+    poprzednia: (Gray8, dashboard::Screen),
 ) -> (Gray8, dashboard::Screen) {
     // Dopóki panel nie dostał w tym wybudzeniu pełnej klatki, `back_fb` epdiy kłamie
     // — więc pierwsze przerysowanie idzie pełne niezależnie od tego, o co prosi
@@ -1648,8 +1686,16 @@ fn repaint(
             out
         }
         Err(e) => {
+            // Zwracamy POPRZEDNIĄ klatkę, nie pustą. Wcześniej szło tu
+            // `Screen::default()`, czyli **pusta mapa dotykowa** — po jednym błędzie
+            // sterownika okno stawało się martwe do końca, mimo że na szkle wciąż
+            // widać poprawną klatkę. Komentarz nad tą funkcją mówił zresztą dokładnie
+            // to, czego kod nie robił.
+            //
+            // Świeżo wyrenderowana klatka też jest zła: skoro wypchnięcie zawiodło,
+            // na szkle została STARA treść i to jej mapa jest prawdziwa.
             error!("przerysowanie nie powiodło się: {e:#}");
-            (Gray8::new(rotation), dashboard::Screen::default())
+            poprzednia
         }
     }
 }

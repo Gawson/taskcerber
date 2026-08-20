@@ -112,7 +112,18 @@ fn counts_for(model: &Model, year: i32, month: u32) -> [u8; 31] {
 /// Poza nim kratka jest pusta NIE dlatego, że nic się nie dzieje, tylko dlatego,
 /// że nikt nie pytał. To są dwie różne rzeczy i widok musi je odróżniać — inaczej
 /// pusty koniec miesiąca czyta się jako „mam wolne", co bywa nieprawdą.
+///
+/// Bierzemy to z [`Model::known`], a NIE z pierwszego i ostatniego wpisu w `days`.
+/// Pierwsza wersja tego widoku wyprowadzała zakres z `days` i był to ten sam błąd,
+/// tylko odwrócony: `group_by_day` nie tworzy grup dla dni bez wydarzeń, więc wolny
+/// wtorek w środku horyzontu wychodził jako dzień, o który nie pytano.
+///
+/// `days` zostaje jako awaryjne źródło dla modeli budowanych ręcznie — w testach
+/// i w podglądzie — które `known` mogą nie mieć.
 fn covered(model: &Model) -> Option<(NaiveDate, NaiveDate)> {
+    if let Some(zakres) = model.known {
+        return Some(zakres);
+    }
     let first = model.days.first()?.date;
     let last = model.days.last()?.date;
     Some((first, last))
@@ -196,6 +207,7 @@ pub fn render_month(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
                 counts[idx as usize],
                 data == today,
                 wie,
+                data < today,
             );
         }
     }
@@ -230,6 +242,7 @@ pub fn render_month(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
 }
 
 /// Rysuje jedną kratkę.
+#[allow(clippy::too_many_arguments)]
 fn draw_day(
     fonts: &Fonts,
     c: &mut Gray8,
@@ -238,10 +251,13 @@ fn draw_day(
     events: u8,
     dzis: bool,
     wie: bool,
+    minione: bool,
 ) {
     // Dzień poza pobranym zakresem dostaje delikatny raster zamiast pustki —
-    // „nie wiem" ma wyglądać inaczej niż „nic nie ma".
-    if !wie {
+    // „nie wiem" ma wyglądać inaczej niż „nic nie ma". Dni MINIONE rastru nie
+    // dostają, choć urządzenie też o nich nie wie: przeszłość nie jest luką
+    // w wiedzy, tylko czymś, co przestało być pytaniem.
+    if !wie && !minione {
         dither_rect(c, cell.inset(2), 1);
     }
 
@@ -273,9 +289,20 @@ fn draw_day(
         num_base,
         TEXT_LEAD,
         if dzis { Weight::Bold } else { Weight::Medium },
-        if dzis { WHITE } else { BLACK },
+        match (dzis, minione) {
+            (true, _) => WHITE,
+            (false, true) => INK_FAINT,
+            (false, false) => BLACK,
+        },
         Align::Left,
     );
+
+    // Miniony dzień nie dostaje pasków. Gęstość przeszłości nie jest informacją,
+    // po którą ktokolwiek patrzy na kalendarz na ścianie, a atrament zabiera uwagę
+    // dniom, które jeszcze są przed nami.
+    if minione {
+        return;
+    }
 
     // Licznik nadmiaru stoi w WIERSZU NUMERU, po prawej — nie pod paskami.
     // Pod paskami mieścił się tylko w pionie: w poziomie kratka ma 64 px wysokości
@@ -373,6 +400,31 @@ mod tests {
                 "{rok}-{mies}: {ile} dni z przesunięciem {offset} nie mieści się w sześciu tygodniach"
             );
         }
+    }
+
+    #[test]
+    fn wolny_dzien_w_horyzoncie_nie_dostaje_woalu() {
+        // To jest błąd, który miał ten widok w pierwszej wersji: zakres „co wiemy"
+        // brał się z `days`, a `group_by_day` nie tworzy grup dla dni bez wydarzeń.
+        // Wolny wtorek w środku horyzontu wychodził więc jako dzień, o który nikt
+        // nie pytał — czyli dokładnie to kłamstwo, przed którym woal miał bronić.
+        let mut m = model_na(2026, 8, 10);
+        m.known = Some((
+            NaiveDate::from_ymd_opt(2026, 8, 10).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 8, 24).unwrap(),
+        ));
+        // Wydarzenia tylko 10 i 24 — środek horyzontu jest pusty, ale ZNANY.
+        m.days = vec![];
+
+        let zakres = covered(&m).expect("known ma pierwszeństwo przed days");
+        assert_eq!(zakres.0, NaiveDate::from_ymd_opt(2026, 8, 10).unwrap());
+        assert_eq!(zakres.1, NaiveDate::from_ymd_opt(2026, 8, 24).unwrap());
+
+        let srodek = NaiveDate::from_ymd_opt(2026, 8, 17).unwrap();
+        assert!(
+            srodek >= zakres.0 && srodek <= zakres.1,
+            "wolny dzień w środku horyzontu musi być uznany za ZNANY"
+        );
     }
 
     #[test]

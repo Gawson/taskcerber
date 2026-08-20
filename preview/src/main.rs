@@ -332,6 +332,7 @@ fn scenario_miesiac() -> Model {
         (25, 1),
         (26, 3),
     ];
+    m.known = Some((date(10), date(26)));
     m.days = gestosc
         .iter()
         .map(|&(d, ile)| DayGroup {

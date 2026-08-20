@@ -24,6 +24,16 @@ pub struct Model {
     /// Gdy ustawione, zamiast agendy pokazywany jest widok szczegółów
     /// wydarzenia o tym indeksie globalnym.
     pub focus: Option<usize>,
+    /// O jakie dni urządzenie w ogóle PYTAŁO — zakres domknięty obustronnie.
+    ///
+    /// To nie to samo co zakres dni, w których coś się dzieje, i ta różnica jest
+    /// widoczna na ekranie. `days` zawiera wyłącznie dni Z WYDARZENIAMI, bo
+    /// `group_by_day` nie tworzy pustych grup — więc wyprowadzanie „co wiemy"
+    /// z pierwszego i ostatniego wpisu daje kłamstwo w obie strony: wolny wtorek
+    /// w środku horyzontu wygląda jak dzień, o który nie pytano.
+    ///
+    /// `None` = urządzenie nic nie pobrało; wtedy nie wie nic o żadnym dniu.
+    pub known: Option<(NaiveDate, NaiveDate)>,
 }
 
 impl Model {
@@ -37,6 +47,7 @@ impl Model {
             tiles: Vec::new(),
             firmware: String::new(),
             page: 0,
+            known: None,
             focus: None,
         }
     }
