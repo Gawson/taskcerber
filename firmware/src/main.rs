@@ -347,11 +347,16 @@ fn run(mut state: RtcState) -> Result<u64> {
     }
 
     if needs_paint || interact {
-        let model = if config.is_provisioned() {
+        let mut model = if config.is_provisioned() {
             build_model(now, events, fuel, power_status.usb_present, net_state)
         } else {
             provisioning_model(now, fuel, power_status.usb_present)
         };
+
+        // Urządzenie budzi się w tym widoku, w którym je zostawiono. Bez tego
+        // miesiąc czy rok znikały przy pierwszym przemalowaniu i nie dało się
+        // zrobić z nich stałego ekranu ściennego.
+        model.view = dashboard::View::from_u8(state.view);
 
         // Pierwsze rysowanie w tym wybudzeniu MUSI być pełne — `back_fb` epdiy
         // powstał przed chwilą wyzerowany do bieli i nie wie nic o tym, co zostało
@@ -1257,6 +1262,10 @@ fn interactive_loop(
                 model.view = v;
                 model.focus = None;
                 model.page = 0;
+                // Wybór ląduje w strukturze teraz, a w pamięci RTC dopiero przy
+                // `RtcState::store()` przed uśpieniem — i to wystarczy, bo `.rtc.data`
+                // i tak nie przeżywa resetu innego niż wybudzenie z deep sleepu.
+                state.view = v.as_u8();
                 (canvas, screen) = repaint(
                     epd,
                     &model,

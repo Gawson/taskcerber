@@ -10,6 +10,7 @@
 //!   odświeżenie panelu (360 mAs -> 210 mAs).
 //! * **Licznik szybkich odświeżeń** — po N trzeba wtrącić pełne, inaczej zostają duchy.
 //! * **Licznik kolejnych porażek sieci** — wykładnicze wycofanie.
+//! * **Ostatnio oglądany widok** — żeby miesiąc albo rok mógł być stałym ekranem.
 //!
 //! ## Uwaga na `--gc-sections`
 //! Sekcja `.rtc.data` bywa wycinana przez linker, jeśli nic jej wprost nie używa.
@@ -21,7 +22,7 @@ use log::info;
 
 // Bump przy KAŻDEJ zmianie układu `RtcState`. Stary stan w pamięci RTC ma inny
 // rozmiar i przesunięcia pól; bez zmiany magii zostałby odczytany jako śmieci.
-const MAGIC: u32 = 0x5435_5F35; // "T5_5"
+const MAGIC: u32 = 0x5435_5F36; // "T5_6"
 
 /// Ile razy z rzędu sieć musi zawieść, zanim wydłużymy odstępy.
 pub const FAILURES_BEFORE_BACKOFF: u8 = 3;
@@ -54,6 +55,12 @@ pub struct RtcState {
     pub energy_start_unix: i64,
     /// Pozostała pojemność w chwili założenia linii bazowej, mAh.
     pub energy_start_mah: u16,
+    /// Ostatnio oglądany widok, jako [`dashboard::View::as_u8`].
+    ///
+    /// Dzięki temu urządzenie budzi się w tym widoku, w którym je zostawiono —
+    /// miesiąc albo rok może być stałym ekranem ściennym, a nie czymś, co znika
+    /// przy pierwszym przemalowaniu.
+    pub view: u8,
 }
 
 // Licznika prób OTA tutaj NIE MA i to jest świadome. Bootloader przeładowuje
@@ -79,6 +86,7 @@ static mut RTC_STATE: RtcState = RtcState {
     fetch_requested: false,
     energy_start_unix: 0,
     energy_start_mah: 0,
+    view: 0,
 };
 
 impl RtcState {
@@ -104,6 +112,7 @@ impl RtcState {
                 fetch_requested: false,
                 energy_start_unix: 0,
                 energy_start_mah: 0,
+                view: 0,
             };
         }
 

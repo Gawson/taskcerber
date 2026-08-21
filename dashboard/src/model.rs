@@ -25,6 +25,29 @@ pub enum View {
 impl View {
     pub const ALL: [View; 3] = [View::Agenda, View::Month, View::Year];
 
+    /// Numer wariantu do zapisu poza pamięcią programu.
+    ///
+    /// Jawny, a nie `as u8` po dyskryminancie: te bajty lądują w pamięci RTC
+    /// i przeżywają uśpienie, więc dołożenie widoku w środku listy nie może
+    /// przestawić znaczenia już zapisanej wartości.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            View::Agenda => 0,
+            View::Month => 1,
+            View::Year => 2,
+        }
+    }
+
+    /// Odwrotność [`View::as_u8`]. Nieznana wartość daje widok domyślny —
+    /// zapisany stan pochodzi z innej wersji firmware'u i nie ma sensu mu ufać.
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => View::Month,
+            2 => View::Year,
+            _ => View::Agenda,
+        }
+    }
+
     /// Napis na zakładce. Krótki, bo segment ma 180 px w pionie.
     pub fn label(self) -> &'static str {
         match self {
@@ -410,4 +433,18 @@ mod tests {
         assert_eq!(godzina(dt(2026, 8, 18, 9, 5)), "09:05");
         assert_eq!(godzina(dt(2026, 8, 18, 0, 0)), "00:00");
     }
+    /// Numery wariantów lądują w pamięci RTC i przeżywają uśpienie, więc ich
+    /// znaczenie jest częścią formatu zapisu, a nie szczegółem implementacji.
+    #[test]
+    fn numery_widokow_sa_stabilne_i_odwracalne() {
+        assert_eq!(View::Agenda.as_u8(), 0);
+        assert_eq!(View::Month.as_u8(), 1);
+        assert_eq!(View::Year.as_u8(), 2);
+        for v in View::ALL {
+            assert_eq!(View::from_u8(v.as_u8()), v);
+        }
+        // Zapis z innej wersji firmware'u nie może wpaść w nieistniejący widok.
+        assert_eq!(View::from_u8(200), View::Agenda);
+    }
+
 }
