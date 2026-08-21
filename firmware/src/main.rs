@@ -337,6 +337,7 @@ fn run(mut state: RtcState) -> Result<u64> {
             home_tz,
             now,
             power::may_update(&policy, mode, fuel),
+            migawka_swieza,
             epd_early.as_mut().zip(trace.as_mut()),
         );
         // Powrót z tej funkcji — obojętne czy z sukcesem, czy z błędem — znaczy,
@@ -364,21 +365,27 @@ fn run(mut state: RtcState) -> Result<u64> {
                 }
 
                 content_crc = out.crc;
-                events = out.events;
                 known = out.known;
                 known_holidays = out.known_holidays;
-                fetched = true;
+                if out.unchanged {
+                    // Treść bez zmian: `events` z migawki zostają nietknięte,
+                    // a migawki nie przepisujemy — CRC i tak jest to samo.
+                    info!("kanał bez zmian — zostaję przy migawce");
+                } else {
+                    events = out.events;
+                    fetched = true;
 
-                // Zapis PRZED `record_success`, bo ta funkcja nadpisuje
-                // `last_content_crc` — a to z nim porównujemy, żeby nie zapisywać
-                // do flasha kalendarza, który się nie zmienił.
-                let snap = dashboard::Snapshot {
-                    events: events.clone(),
-                    holidays: swieta_z_wydarzen(&events),
-                    known,
-                    known_holidays,
-                };
-                store.save_snapshot(&snap, content_crc, state.last_content_crc);
+                    // Zapis PRZED `record_success`, bo ta funkcja nadpisuje
+                    // `last_content_crc` — a to z nim porównujemy, żeby nie zapisywać
+                    // do flasha kalendarza, który się nie zmienił.
+                    let snap = dashboard::Snapshot {
+                        events: events.clone(),
+                        holidays: swieta_z_wydarzen(&events),
+                        known,
+                        known_holidays,
+                    };
+                    store.save_snapshot(&snap, content_crc, state.last_content_crc);
+                }
 
                 state.record_success(net::time::now_unix(), content_crc);
             }
@@ -708,6 +715,9 @@ struct Fetched {
     known: Option<(NaiveDate, NaiveDate)>,
     /// O które dni zapytał kanał świąt — osobno, bo ma inny horyzont.
     known_holidays: Option<(NaiveDate, NaiveDate)>,
+    /// Treść identyczna z poprzednią — `events` jest puste i NIE WOLNO nim
+    /// nadpisać tego, co przyszło z migawki.
+    unchanged: bool,
     /// Nowy obraz leży już w wolnym slocie i slot startowy jest przestawiony.
     /// Wołający ma zrestartować — ale dopiero wtedy, gdy uzna, że wolno.
     ota_installed: bool,
@@ -727,6 +737,10 @@ fn fetch_everything(
     home_tz: chrono_tz::Tz,
     now: NaiveDateTime,
     ota_allowed: bool,
+    // `migawka_uzyteczna`: czy w NVS leży migawka, na którą można się wycofać.
+    // Warunkuje pominięcie parsowania przy niezmienionej treści — bez niej byłoby
+    // to pokazanie pustego ekranu zamiast oszczędności.
+    migawka_uzyteczna: bool,
     // Panel i ślad — obecne tylko przy włączonym `NET_TRACE_ON_PANEL`.
     slad: Option<(&mut Epd, &mut NetTrace)>,
 ) -> Result<Fetched> {
@@ -801,6 +815,9 @@ fn fetch_everything(
 
     let mut any_ok = false;
     let mut last_error = None;
+    // Surowa treść czeka tu na PARSOWANIE PO ZGASZENIU RADIA. Bufory leżą w PSRAM-ie,
+    // bo przekraczają `SPIRAM_MALLOC_ALWAYSINTERNAL`.
+    let mut pobrane: Vec<(usize, NaiveDateTime, crate::source::Downloaded)> = Vec::new();
     let mut known = None;
     let mut known_holidays = None;
     for (i, src) in sources.iter().enumerate() {
@@ -817,10 +834,10 @@ fn fetch_everything(
         ));
         // Okno liczone POD ŹRÓDŁO — to jest cały sens `horizon_days`.
         let to = from + ChronoDuration::days(src.horizon_days());
-        match src.fetch(from, to) {
-            Ok(result) => {
-                crc ^= result.content_crc;
-                events.extend(result.events);
+        match src.download() {
+            Ok(dl) => {
+                crc ^= dl.content_crc;
+                pobrane.push((i, to, dl));
                 any_ok = true;
                 // O które dni to źródło faktycznie zapytało. Bez tego widoki
                 // rastrują całą siatkę jako „nie wiem" — a `Model::known`
@@ -874,12 +891,49 @@ fn fetch_everything(
         return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("brak skonfigurowanych źródeł")));
     }
 
+    // Treść bez zmian — parsowania nie ma po co robić W OGÓLE.
+    //
+    // CRC znamy teraz PRZED parsowaniem, bo pobranie jest od niego oddzielone. Wcześniej
+    // liczyliśmy je w locie ze strumienia, czyli dowiadywaliśmy się o braku zmian dopiero
+    // po zapłaceniu za mielenie 1,18 MB. Warunek `migawka_uzyteczna` jest konieczny:
+    // bez niej pominięcie parsowania dałoby pusty ekran zamiast oszczędności.
+    let bez_zmian = crc != 0 && crc == state.last_content_crc && migawka_uzyteczna;
+    if bez_zmian {
+        krok!("bez zmian — pomijam parsowanie");
+        return Ok(Fetched {
+            events: Vec::new(),
+            crc,
+            known,
+            known_holidays,
+            unchanged: true,
+            ota_installed,
+        });
+    }
+
+    krok!(&format!(
+        "parsuję bez radia · DRAM {} KB · stos {} B",
+        wolny_dram_kb(),
+        zapas_stosu_b()
+    ));
+    for (i, to, dl) in &pobrane {
+        match sources[*i].parse(&dl.body, from, *to) {
+            Ok(mut e) => events.append(&mut e),
+            Err(e) => warn!("źródło `{}` nie sparsowało się: {e:#}", sources[*i].name()),
+        }
+    }
+    krok!(&format!(
+        "sparsowane · DRAM {} KB · stos {} B",
+        wolny_dram_kb(),
+        zapas_stosu_b()
+    ));
+
     events.sort_by_key(|e| e.start);
     Ok(Fetched {
         events,
         crc,
         known,
         known_holidays,
+        unchanged: false,
         ota_installed,
     })
 }

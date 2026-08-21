@@ -15,12 +15,12 @@
 //! więc warunkowe GET-y nie wchodzą w grę. Za każdym razem płacimy za pełne pobranie
 //! i dopiero po stronie urządzenia odsiewamy okno. Stąd parser strumieniowy.
 
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 
 use anyhow::{bail, Context, Result};
 use chrono::NaiveDateTime;
 use chrono_tz::Tz;
-use dashboard::model::SourceTag;
+use dashboard::model::{CalEvent, SourceTag};
 use devlogic::redact;
 use icalfeed::{parse_feed, FeedError, Window};
 use log::{info, warn};
@@ -28,7 +28,16 @@ use log::{info, warn};
 use crate::net::http;
 use crate::power::rtc_state::crc32;
 
-use super::{EventSource, FetchResult};
+use super::{Downloaded, EventSource};
+
+/// Ile bajtów rezerwujemy z góry na treść kanału.
+///
+/// Google nie podaje `Content-Length` (odpowiedź jest kawałkowana), więc bez rezerwacji
+/// megabajtowy bufor realokowałby się kilkanaście razy, kopiując za każdym razem całość.
+const REZERWA_BUFORA: usize = 512 * 1024;
+
+/// Górny limit treści kanału. Dwa źródła po tyle wciąż mieszczą się w 8 MB PSRAM-u.
+const MAX_BODY: usize = 2 * 1024 * 1024;
 
 pub struct IcsSource {
     url: String,
@@ -67,64 +76,34 @@ impl EventSource for IcsSource {
         self.horizon_days
     }
 
-    fn fetch(&self, from: NaiveDateTime, to: NaiveDateTime) -> Result<FetchResult> {
+    fn download(&self) -> Result<Downloaded> {
         info!("pobieram kanał iCal: {}", redact(&self.url));
 
-        let reader = http::get(&self.url).context("nie mogę pobrać kanału")?;
+        let mut reader = http::get(&self.url).context("nie mogę pobrać kanału")?;
 
-        // Bufor 4 KB: parser i tak czyta liniami, a większy tylko zabiera DRAM
-        // buforom mbedTLS.
-        let mut buffered = BufReader::with_capacity(4096, reader);
-
-        // CRC liczymy w locie na strumieniu, nie na zebranej całości —
-        // kalendarz może mieć setki kilobajtów.
-        let mut hasher = StreamingCrc::new();
-        let tee = Tee {
-            inner: &mut buffered,
-            crc: &mut hasher,
-        };
-
-        let window = Window {
-            start: from,
-            end: to,
-        };
-        let events = match parse_feed(
-            BufReader::with_capacity(4096, tee),
-            window,
-            self.home,
-            self.tag,
-        ) {
-            Ok(e) => e,
-            Err(FeedError::Truncated) => {
-                // Brak END:VCALENDAR znaczy jedno z dwóch i warto je rozróżnić, bo
-                // prowadzą do zupełnie różnych działań. Zero przeczytanych bajtów
-                // z BEGIN:VCALENDAR to nie urwane pobranie, tylko ODPOWIEDŹ, KTÓRA
-                // NIE JEST KALENDARZEM — typowo strona logowania Google, bo ktoś
-                // wkleił link do kalendarza z paska przeglądarki zamiast adresu ICS.
-                if !hasher.saw_vcalendar() {
-                    // Podpowiedź celowo OPISUJE adres, zamiast pokazywać jego wzór.
-                    // Dosłowny szablon z „/calendar/ical/.../private-" wpada w skaner
-                    // sekretów z tools/check-image.sh, który nie odróżnia przykładu
-                    // od prawdziwego klucza — i słusznie, bo nie ma jak.
-                    bail!(
-                        "to nie jest kanał iCal — serwer odpowiedział czymś innym, \
-                         najczęściej stroną logowania. Weź adres z: Google Kalendarz -> \
-                         Ustawienia kalendarza -> Integracja kalendarza -> \
-                         „Prywatny adres w formacie iCal”. Musi kończyć się na basic.ics; \
-                         link skopiowany z paska przeglądarki NIE jest kanałem iCal."
-                    )
-                }
-                bail!("pobieranie urwane — brak END:VCALENDAR, dane byłyby niekompletne")
+        // Zbieramy CAŁOŚĆ do pamięci, zamiast parsować w locie. Bufor rośnie ponad
+        // 4 KB, więc `SPIRAM_MALLOC_ALWAYSINTERNAL` przenosi go do PSRAM-u — a tam
+        // 1,18 MB to 15% z ośmiu megabajtów i nikomu nie wchodzi w drogę.
+        // Rezerwacja z góry, bo Google nie podaje Content-Length (odpowiedź jest
+        // kawałkowana), a rośnięcie od zera realokowałoby megabajt kilkanaście razy.
+        let mut body: Vec<u8> = Vec::with_capacity(REZERWA_BUFORA);
+        let mut kawalek = [0u8; 4096];
+        loop {
+            let n = reader.read(&mut kawalek).context("błąd odczytu kanału")?;
+            if n == 0 {
+                break;
             }
-            Err(FeedError::Io(e)) => bail!("błąd odczytu kanału: {e}"),
-        };
+            if body.len() + n > MAX_BODY {
+                bail!(
+                    "kanał przekroczył {} MB — nie pobieram dalej",
+                    MAX_BODY / (1024 * 1024)
+                );
+            }
+            body.extend_from_slice(&kawalek[..n]);
+        }
 
-        let crc = hasher.finish();
-        let bytes = hasher.len();
-
-        // Podwójne zabezpieczenie: parser sprawdza END:VCALENDAR, a tu sprawdzamy,
-        // czy transport nie zatrzasnął błędu po drodze.
-        let reader = buffered.into_inner();
+        // Zatrzask błędu strumienia MUSI być sprawdzony: urwane pobranie wygląda
+        // dla pętli `read` dokładnie jak koniec pliku.
         if let Some(e) = reader.error() {
             bail!("połączenie zawiodło w trakcie pobierania: {e}");
         }
@@ -132,18 +111,48 @@ impl EventSource for IcsSource {
             warn!("liczba przeczytanych bajtów nie zgadza się z Content-Length");
         }
 
-        info!(
-            "kanał {}: {} wydarzeń z {} bajtów",
-            self.label,
-            events.len(),
-            bytes
-        );
+        let mut hasher = StreamingCrc::new();
+        hasher.update(&body);
+        if !hasher.saw_vcalendar() {
+            // Podpowiedź celowo OPISUJE adres, zamiast pokazywać jego wzór. Dosłowny
+            // szablon wpada w skaner sekretów z tools/check-image.sh, który nie
+            // odróżnia przykładu od prawdziwego klucza — i słusznie, bo nie ma jak.
+            bail!(
+                "to nie jest kanał iCal — serwer odpowiedział czymś innym, \
+                 najczęściej stroną logowania. Weź adres z: Google Kalendarz -> \
+                 Ustawienia kalendarza -> Integracja kalendarza -> \
+                 „Prywatny adres w formacie iCal”. Musi kończyć się na basic.ics; \
+                 link skopiowany z paska przeglądarki NIE jest kanałem iCal."
+            )
+        }
 
-        Ok(FetchResult {
-            events,
-            content_crc: crc,
-            bytes,
+        info!("kanał {}: {} B pobrane", self.label, body.len());
+        Ok(Downloaded {
+            content_crc: hasher.finish(),
+            body,
         })
+    }
+
+    fn parse(&self, body: &[u8], from: NaiveDateTime, to: NaiveDateTime) -> Result<Vec<CalEvent>> {
+        let window = Window {
+            start: from,
+            end: to,
+        };
+        match parse_feed(
+            BufReader::with_capacity(4096, body),
+            window,
+            self.home,
+            self.tag,
+        ) {
+            Ok(events) => {
+                info!("kanał {}: {} wydarzeń", self.label, events.len());
+                Ok(events)
+            }
+            Err(FeedError::Truncated) => {
+                bail!("pobieranie urwane — brak END:VCALENDAR, dane byłyby niekompletne")
+            }
+            Err(FeedError::Io(e)) => bail!("błąd odczytu kanału: {e}"),
+        }
     }
 }
 
