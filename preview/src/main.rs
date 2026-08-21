@@ -34,6 +34,8 @@ enum Scene {
     Month(Box<Model>),
     /// Widok roczny.
     Year(Box<Model>),
+    /// Ekran diagnozy po cichym zgonie poprzedniego cyklu.
+    Diagnoza,
     /// Karta jednorodności tła.
     Uniformity,
     Dash(Box<Model>),
@@ -96,6 +98,7 @@ fn main() {
         ],
         "miesiac" | "month" => vec![("miesiac", Scene::Month(Box::new(scenario_miesiac())))],
         "rok" | "year" => vec![("rok", Scene::Year(Box::new(scenario_rok())))],
+        "diagnoza" => vec![("diagnoza", Scene::Diagnoza)],
         "tony" | "testcard" => vec![("tony", Scene::TestCard)],
         "jednorodnosc" | "uniformity" => vec![("jednorodnosc", Scene::Uniformity)],
         "detail" => vec![("detail", {
@@ -120,6 +123,21 @@ fn main() {
             }
             Scene::Month(model) => dashboard::render(model, &fonts, &mut canvas).hits.len(),
             Scene::Year(model) => dashboard::render(model, &fonts, &mut canvas).hits.len(),
+            Scene::Diagnoza => dashboard::render_diagnosis(
+                &dashboard::Diagnosis {
+                    // Najgorszy realny przypadek: najdłuższa nazwa etapu i liczby
+                    // z prawdziwego zgłoszenia ze sprzętu.
+                    step: "pobieranie 2. kalendarza",
+                    hint: "sprawdź adres iCal; przy mało wolnej pamięci to może być TLS",
+                    ms: 4700,
+                    dram_kb: 62,
+                    firmware: "t5s3pro 0.1.0+gd8acb08",
+                },
+                &fonts,
+                &mut canvas,
+            )
+            .hits
+            .len(),
             Scene::Uniformity => {
                 dashboard::render_uniformity_card(&fonts, &mut canvas);
                 0

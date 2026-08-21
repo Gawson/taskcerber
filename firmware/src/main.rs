@@ -37,6 +37,7 @@ use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, NaiveDate, NaiveDateTime};
 use dashboard::model::{Battery, DayGroup, NetState, SourceTag};
 use dashboard::{Action, Fonts, Gray8, Model, Rotation};
+use devlogic::boot::BootStep;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::reset::ResetReason;
@@ -175,6 +176,22 @@ fn run(mut state: RtcState) -> Result<u64> {
         fuel.percent, power_status.usb_present
     );
 
+    // Okruszek z poprzedniego cyklu. Jeśli tamten zamilkł w środku, TEN cykl
+    // pomija sieć i oddaje panel diagnozie — bo panelu i radia nie wolno trzymać
+    // naraz, a pisanie kroków na ekran w trakcie TLS-a powodowało dokładnie tę
+    // awarię, którą miało pokazać. Pełne wyjaśnienie: nagłówek `devlogic::boot`.
+    let okruszek = store.boot_crumb();
+    let diagnoza = okruszek.is_failure();
+    if diagnoza {
+        warn!(
+            "poprzedni cykl zamilkł na {:?} po {} ms, wolny DRAM {} KB — pomijam sieć",
+            okruszek.step, okruszek.ms, okruszek.dram_kb
+        );
+        // Znacznik idzie PRZED malowaniem: gdyby padło samo malowanie, następny
+        // cykl ma spróbować sieci, a nie utknąć na tej samej diagnozie w kółko.
+        store.mark_boot_step(BootStep::Reported, ms_od_startu(), wolny_dram_kb() as u16);
+    }
+
     // --- 5. Sieć ---------------------------------------------------------------
     //
     // `Epd` powstaje tu TYLKO wtedy, gdy ślad na panelu jest włączony — bo tylko
@@ -205,7 +222,17 @@ fn run(mut state: RtcState) -> Result<u64> {
     // wyłącznie na kablu. Patrz [`RADIO_ONLY_ON_USB`].
     let radio_allowed = !RADIO_ONLY_ON_USB || power_status.usb_present;
 
-    if !config.is_provisioned() {
+    if diagnoza {
+        // Sieć pominięta świadomie — patrz wyżej. Stan zgłaszamy jako nieaktualny,
+        // żeby ewentualne późniejsze ekrany nie udawały świeżych danych.
+        if state.last_success_unix > 0 {
+            net_state = NetState::Stale {
+                since: unix_to_local(state.last_success_unix, home_tz).unwrap_or(now),
+            };
+        } else {
+            net_state = NetState::Offline;
+        }
+    } else if !config.is_provisioned() {
         warn!("urządzenie nieskonfigurowane — pokazuję ekran konfiguracji");
         net_state = NetState::NeedsAuth;
     } else if !radio_allowed {
@@ -227,7 +254,7 @@ fn run(mut state: RtcState) -> Result<u64> {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
         let mut trace = (epd_early.is_some() && power_status.usb_present)
             .then(|| NetTrace::begin(rotation, temperature));
-        match fetch_everything(
+        let wynik_sieci = fetch_everything(
             peripherals.modem,
             sysloop,
             nvs_partition,
@@ -239,7 +266,12 @@ fn run(mut state: RtcState) -> Result<u64> {
             now,
             power::may_update(&policy, mode, fuel),
             epd_early.as_mut().zip(trace.as_mut()),
-        ) {
+        );
+        // Powrót z tej funkcji — obojętne czy z sukcesem, czy z błędem — znaczy,
+        // że cykl PRZEŻYŁ krok sieciowy. Okruszek ma łapać ciche zgony (panika,
+        // watchdog, brownout), a nie obsłużone błędy w rodzaju 404 na kanale.
+        store.mark_boot_step(BootStep::Done, ms_od_startu(), wolny_dram_kb() as u16);
+        match wynik_sieci {
             Ok(out) => {
                 // Restart natychmiast: radio jest już wyłączone, a szyny panelu są
                 // opuszczone — `Epd` istnieje od kroku 5, ale `present` gasi je po
@@ -314,16 +346,24 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Wybudzenie przyciskiem zawsze rysuje. Ktoś nacisnął, więc czegoś od urządzenia
     // chce — a za chwilę może chcieć obrócić ekran, co bez świeżej klatki nie ma sensu.
     let woke_by_button = wakeup.by_human();
-    let needs_paint =
-        content_changed || state.boot_count <= 1 || net_state != NetState::Ok || woke_by_button;
+    // Cykl diagnostyczny maluje ZAWSZE: jego jedynym produktem jest ten ekran.
+    let needs_paint = diagnoza
+        || content_changed
+        || state.boot_count <= 1
+        || net_state != NetState::Ok
+        || woke_by_button;
 
     let boot_count = state.boot_count;
-    let interact = wants_interaction(
-        config.is_provisioned(),
-        power_status.usb_present,
-        boot_count,
-        woke_by_button,
-    );
+    // Na diagnozie okno dotyku otwieramy bezwarunkowo — bez niego przycisk
+    // „Konfiguracja" byłby rysunkiem, a to on jest zwykle lekarstwem: najczęstsza
+    // awaria to `łączenie z WiFi`, czyli najczęściej literówka w haśle.
+    let interact = diagnoza
+        || wants_interaction(
+            config.is_provisioned(),
+            power_status.usb_present,
+            boot_count,
+            woke_by_button,
+        );
 
     // Dotyk NIE zależy od tego, czy akurat malujemy klatkę — zależność idzie
     // w drugą stronę: to dotknięcie powoduje przerysowanie. Mapa obszarów dotykowych
@@ -365,7 +405,28 @@ fn run(mut state: RtcState) -> Result<u64> {
         // `panel_synced` niesie tę wiedzę dalej: dopóki jest fałszywe, epdiy nie ma
         // prawdziwego punktu odniesienia, więc ani szybkie odświeżenie, ani tym
         // bardziej częściowe (feedback pod palcem) nie dałoby poprawnej różnicy.
-        let (canvas, screen, panel_synced) = if needs_paint {
+        let (canvas, screen, panel_synced) = if diagnoza {
+            let fonts = Fonts::embedded();
+            let mut cv = Gray8::new(rotation);
+            let sc = dashboard::render_diagnosis(
+                &dashboard::Diagnosis {
+                    step: okruszek.step.label(),
+                    hint: okruszek.step.hint(),
+                    ms: okruszek.ms,
+                    dram_kb: okruszek.dram_kb,
+                    firmware: VERSION,
+                },
+                &fonts,
+                &mut cv,
+            );
+            match present(&mut epd, &cv, &mut state, temperature, Refresh::Full) {
+                Ok(()) => (cv, sc, true),
+                Err(e) => {
+                    error!("nie mogę pokazać diagnozy: {e:#}");
+                    (cv, sc, false)
+                }
+            }
+        } else if needs_paint {
             match paint(
                 &mut epd,
                 &model,
@@ -599,6 +660,15 @@ fn fetch_everything(
         };
     }
 
+    // Okruszek zapisujemy TUŻ PRZED etapem, nie po nim: ma przeżyć to, co się
+    // w tym etapie stanie, a właśnie te etapy potrafią zabrać ze sobą cały układ.
+    macro_rules! okruszek {
+        ($etap:expr) => {
+            store.mark_boot_step($etap, ms_od_startu(), wolny_dram_kb() as u16);
+        };
+    }
+
+    okruszek!(BootStep::RadioUp);
     krok!(&format!("podnoszę radio · DRAM {} KB", wolny_dram_kb()));
     let wifi = net::wifi::Wifi::connect(modem, sysloop, nvs, ssid, password, state)?;
     krok!(&format!("radio gotowe · DRAM {} KB", wolny_dram_kb()));
@@ -608,6 +678,7 @@ fn fetch_everything(
 
     // Czas przed HTTPS — przy CONFIG_MBEDTLS_HAVE_TIME_DATE=y zły zegar to
     // odrzucony certyfikat.
+    okruszek!(BootStep::Sntp);
     krok!("SNTP");
     if let Err(e) = net::time::sync_sntp(&hw.rtc, home_tz) {
         warn!("SNTP zawiódł: {e:#}");
@@ -641,7 +712,12 @@ fn fetch_everything(
 
     let mut any_ok = false;
     let mut last_error = None;
-    for src in &sources {
+    for (i, src) in sources.iter().enumerate() {
+        okruszek!(if i == 0 {
+            BootStep::FetchPrimary
+        } else {
+            BootStep::FetchSecondary
+        });
         krok!(&format!(
             "pobieram {} · DRAM {} KB",
             src.name(),
@@ -665,6 +741,7 @@ fn fetch_everything(
     // Po kalendarzu, bo kalendarz jest funkcją urządzenia, a aktualizacja tylko
     // utrzymaniem: nieudane albo długie OTA nie ma prawa zabrać ekranowi treści.
     krok!(&format!("pobrane · DRAM {} KB", wolny_dram_kb()));
+    okruszek!(BootStep::Ota);
     let mut ota_installed = false;
     if ota_allowed {
         match config.ota_url.as_deref() {
@@ -682,6 +759,7 @@ fn fetch_everything(
     }
 
     // Radio w dół ZANIM dotkniemy panelu.
+    okruszek!(BootStep::RadioDown);
     wifi.shutdown();
 
     if !any_ok {
@@ -1982,6 +2060,14 @@ impl Button {
 /// realnie brakuje — PSRAM-u jest osiem megabajtów. Handshake TLS do Google
 /// z pełnym pakietem certyfikatów to szczyt zapotrzebowania w całym cyklu, więc
 /// liczba tuż przed nim mówi, ile marginesu naprawdę zostało.
+/// Milisekundy od startu układu — do okruszka startowego.
+///
+/// `esp_timer_get_time` liczy od resetu, więc jest odporny na to, że w chwili
+/// zapisu zegar kalendarzowy może być jeszcze nieustawiony (SNTP dopiero przed nami).
+fn ms_od_startu() -> u32 {
+    (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000).clamp(0, u32::MAX as i64) as u32
+}
+
 fn wolny_dram_kb() -> u32 {
     // SAFETY: prosty getter z ESP-IDF, bez stanu.
     let bytes =

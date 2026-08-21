@@ -19,6 +19,7 @@
 //! ```
 
 pub mod canvas;
+pub mod diagnosis;
 pub mod hit;
 pub mod layout;
 pub mod model;
@@ -33,6 +34,7 @@ pub mod year;
 pub use canvas::{
     dither_rect, ink_level, Gray8, Rect, Rotation, PACKED_LEN, PANEL_HEIGHT, PANEL_WIDTH,
 };
+pub use diagnosis::{render_diagnosis, Diagnosis};
 pub use hit::{Action, HitRegion, Screen, Visual};
 pub use layout::{render, render_saved, render_setup};
 pub use model::{Battery, CalEvent, DayGroup, Model, NetState, SourceTag, Tile, View};

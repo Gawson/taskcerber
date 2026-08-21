@@ -11,6 +11,7 @@
 
 use anyhow::{Context, Result};
 use dashboard::Rotation;
+use devlogic::boot::{BootStep, Crumb};
 use devlogic::ota::Attempts;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 
@@ -30,6 +31,12 @@ const KEY_OTA_URL: &str = "ota_url";
 // nie jest wybudzeniem z deep sleepu — a po wgraniu nowego obrazu wołamy
 // `esp_restart()`. Licznik zerował się więc dokładnie w tym scenariuszu, przed
 // którym miał chronić. Pełne wyjaśnienie: nagłówek `devlogic::ota`.
+// Okruszek startowy. W NVS z dokładnie tego samego powodu co licznik prób OTA
+// powyżej: panika, watchdog i `esp_restart()` kasują `.rtc.data`, a to są właśnie
+// te trzy przypadki, o których okruszek ma opowiedzieć. Jeden klucz, nie trzy —
+// NVS liczy zapisy, a nie bajty. Pełne wyjaśnienie: nagłówek `devlogic::boot`.
+const KEY_BOOT_CRUMB: &str = "boot_crumb";
+
 const KEY_OTA_TRY_VER: &str = "ota_try_ver";
 const KEY_OTA_TRY_N: &str = "ota_try_n";
 
@@ -155,6 +162,28 @@ impl Store {
     }
 
     /// Ile razy próbowaliśmy już wgrać którą wersję.
+    /// Okruszek zostawiony przez poprzedni cykl.
+    ///
+    /// Brak wpisu czytamy jako `Done`: świeżo przeflashowane urządzenie nie ma
+    /// awarii do pokazania, a ekran diagnozy o niczym byłby gorszy niż jego brak.
+    pub fn boot_crumb(&self) -> Crumb {
+        match self.nvs.get_u64(KEY_BOOT_CRUMB).ok().flatten() {
+            Some(v) => Crumb::unpack(v),
+            None => Crumb::new(BootStep::Done, 0, 0),
+        }
+    }
+
+    /// Odnotowuje wejście w etap. Woła się TUŻ PRZED nim, nie po — okruszek ma
+    /// przeżyć to, co się w tym etapie stanie.
+    pub fn mark_boot_step(&mut self, step: BootStep, ms: u32, dram_kb: u16) {
+        let packed = Crumb::new(step, ms, dram_kb).pack();
+        if let Err(e) = self.nvs.set_u64(KEY_BOOT_CRUMB, packed) {
+            // Świadomie bez propagacji: diagnostyka nie ma prawa wywrócić cyklu,
+            // który diagnozuje.
+            log::warn!("nie mogę zapisać okruszka {step:?}: {e}");
+        }
+    }
+
     pub fn ota_attempts(&self) -> Attempts {
         Attempts {
             version: self.get_string(KEY_OTA_TRY_VER).unwrap_or_default(),

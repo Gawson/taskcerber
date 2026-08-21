@@ -13,6 +13,7 @@
 //! wgrać nowy obraz, jak rozwiązać adres z manifestu — mieszka więc tutaj i jest
 //! testowane na hoście, tak samo jak `dashboard` i `icalfeed`.
 
+pub mod boot;
 pub mod ota;
 pub mod policy;
 
