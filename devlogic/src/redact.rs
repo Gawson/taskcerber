@@ -4,14 +4,29 @@
 //! zakresu i bez terminu ważności. Wypisanie go w logu z konsoli szeregowej albo
 //! na ekranie konfiguracji jest równoważne z podaniem hasła.
 
-/// Ukrywa tajny fragment prywatnego adresu iCal.
+/// Ukrywa tajny fragment prywatnego adresu iCal, zachowując jego KSZTAŁT.
 ///
 /// Adresy Google przycinamy tuż za `/private-`, bo dokładnie tam zaczyna się sekret.
 /// Dla wszystkiego innego pokazujemy sam host: nie wiemy, gdzie w takim adresie
 /// siedzi materiał uwierzytelniający, więc zakładamy, że wszędzie.
+///
+/// # Dlaczego długość klucza i ogon, a nie same gwiazdki
+///
+/// Bo adres wklepuje się na ekranowej klawiaturze i **najczęstszą pomyłką jest
+/// urwanie go w połowie**, a nie przekręcenie znaku. Samo `private-***` wygląda
+/// wtedy identycznie dla adresu poprawnego i dla uciętego. Długość klucza plus to,
+/// co po nim następuje, rozstrzyga to bez pokazywania sekretu: prawidłowy adres
+/// Google ma 32 znaki klucza i kończy się na `/basic.ics`.
 pub fn redact(url: &str) -> String {
     match url.find("/private-") {
-        Some(i) => format!("{}/private-***", &url[..i]),
+        Some(i) => {
+            let reszta = &url[i + "/private-".len()..];
+            let (klucz, ogon) = match reszta.find('/') {
+                Some(j) => (&reszta[..j], &reszta[j..]),
+                None => (reszta, ""),
+            };
+            format!("{}/private-***({} zn.){}", &url[..i], klucz.len(), ogon)
+        }
         None => match url.split('/').nth(2) {
             Some(host) if !host.is_empty() => host.to_string(),
             _ => "(adres)".to_string(),

@@ -434,6 +434,74 @@ fn occurrences_of(ev: &RawEvent, start: IcalTime, window: Window, home: Tz) -> V
 }
 
 /// Odtwarza blok tekstowy, którego oczekuje `RRuleSet::from_str`.
+/// Sprowadza `UNTIL` w regule do UTC.
+///
+/// # Dlaczego to musi się wydarzyć
+///
+/// Powyżej przepisujemy `DTSTART` **z jawną strefą** `TZID=<strefa domowa>`, bo bez
+/// tego czas pływający i `VALUE=DATE` rozjeżdżają się o dzień. RFC 5545 §3.3.10 mówi
+/// jednak, że jeśli `DTSTART` jest w strefie, to `UNTIL` **musi być w UTC** — a wartość
+/// `RRULE` kopiowaliśmy dosłownie. Google przy wydarzeniach całodniowych wysyła
+/// `UNTIL` jako samą datę, więc powstawała sprzeczność, której biblioteka `rrule`
+/// słusznie nie przyjmuje:
+///
+/// > The value of `DTSTART` was specified in Europe/Warsaw timezone, but `UNTIL`
+/// > was specified in timezone Local.
+///
+/// Skutkiem był **cichy ubytek danych**: cała reguła szła do kosza, a z wydarzenia
+/// cyklicznego zostawało jedno wystąpienie. Na prawdziwym kalendarzu odpadło w ten
+/// sposób dziesięć reguł naraz.
+///
+/// Wartość już zakończona `Z` zostaje nietknięta.
+fn normalize_until(rule: &str, home: Tz) -> String {
+    rule.split(';')
+        .map(|part| {
+            let Some(v) = part
+                .split_once('=')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("UNTIL"))
+                .map(|(_, v)| v)
+            else {
+                return part.to_string();
+            };
+            match until_to_utc(v, home) {
+                Some(utc) => format!("UNTIL={utc}"),
+                None => part.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Zamienia wartość `UNTIL` na UTC. `None`, gdy już jest w UTC albo gdy nie da się
+/// jej odczytać — wtedy lepiej zostawić oryginał i pozwolić bibliotece zaprotestować,
+/// niż podstawić datę wziętą z sufitu.
+fn until_to_utc(v: &str, home: Tz) -> Option<String> {
+    if v.ends_with('Z') {
+        return None;
+    }
+
+    let naive = if v.len() == 8 {
+        // `UNTIL` w postaci samej daty. Bierzemy KONIEC tego dnia, nie początek:
+        // RFC każe traktować granicę włącznie, a północ ucięłaby ostatnie wystąpienie.
+        chrono::NaiveDate::parse_from_str(v, "%Y%m%d")
+            .ok()?
+            .and_hms_opt(23, 59, 59)?
+    } else {
+        NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%S").ok()?
+    };
+
+    // Przy zmianie czasu godzina bywa nieistniejąca albo podwójna. Bierzemy
+    // najwcześniejsze sensowne odwzorowanie — `UNTIL` to granica, więc rozbieżność
+    // godziny jest nieszkodliwa, a brak reguły już nie.
+    let zoned = dt::local_to_zoned(naive, home)?;
+    Some(
+        zoned
+            .with_timezone(&chrono::Utc)
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string(),
+    )
+}
+
 fn rrule_text(ev: &RawEvent, start: IcalTime, home: Tz) -> Option<String> {
     let start_dt = start.as_datetime();
 
@@ -448,7 +516,7 @@ fn rrule_text(ev: &RawEvent, start: IcalTime, home: Tz) -> Option<String> {
 
     for r in &ev.rrule {
         text.push_str("RRULE:");
-        text.push_str(r);
+        text.push_str(&normalize_until(r, home));
         text.push('\n');
     }
     for r in &ev.rdate {
@@ -471,6 +539,59 @@ fn rrule_text(ev: &RawEvent, start: IcalTime, home: Tz) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Reguła z `UNTIL` w postaci samej daty MUSI przejść, bo `DTSTART` dostaje
+    /// od nas jawną strefę. Na prawdziwym kalendarzu ta sprzeczność wyrzuciła
+    /// dziesięć reguł naraz — po cichu, z wydarzenia cyklicznego zostawało jedno.
+    #[test]
+    fn until_bez_strefy_jest_sprowadzane_do_utc() {
+        let home: Tz = chrono_tz::Europe::Warsaw;
+
+        // Koniec dnia 23:59:59 w Warszawie (UTC+1 w listopadzie) to 22:59:59 UTC
+        // TEGO SAMEGO dnia — czyli ostatnie wystąpienie 23 listopada przeżywa.
+        let z_daty = normalize_until("FREQ=WEEKLY;UNTIL=20191123;BYDAY=SA", home);
+        assert_eq!(
+            z_daty, "FREQ=WEEKLY;UNTIL=20191123T225959Z;BYDAY=SA",
+            "data ma zostać tym samym dniem, a reszta reguły nietknięta"
+        );
+
+        let plywajacy = normalize_until("FREQ=DAILY;UNTIL=20260315T120000", home);
+        // Warszawa w marcu to UTC+1, więc 12:00 lokalnie to 11:00 UTC.
+        assert!(
+            plywajacy.contains("UNTIL=20260315T110000Z"),
+            "przeliczenie strefy: {plywajacy}"
+        );
+    }
+
+    /// Wartość już w UTC zostaje nietknięta — inaczej przeliczylibyśmy ją drugi raz.
+    #[test]
+    fn until_w_utc_zostaje_bez_zmian() {
+        let home: Tz = chrono_tz::Europe::Warsaw;
+        let r = "FREQ=WEEKLY;UNTIL=20191123T045959Z;BYDAY=SA";
+        assert_eq!(normalize_until(r, home), r);
+    }
+
+    /// Reguła bez `UNTIL` przechodzi bez zmiany ani jednego znaku.
+    #[test]
+    fn regula_bez_until_nie_jest_ruszana() {
+        let home: Tz = chrono_tz::Europe::Warsaw;
+        for r in [
+            "FREQ=DAILY",
+            "FREQ=WEEKLY;COUNT=10;BYDAY=MO,WE",
+            "FREQ=MONTHLY",
+        ] {
+            assert_eq!(normalize_until(r, home), r, "reguła {r}");
+        }
+    }
+
+    /// Niezrozumiała wartość zostaje oryginałem: lepiej pozwolić bibliotece
+    /// zaprotestować, niż podstawić datę wziętą z sufitu.
+    #[test]
+    fn nieczytelne_until_zostaje_oryginalem() {
+        let home: Tz = chrono_tz::Europe::Warsaw;
+        let r = "FREQ=DAILY;UNTIL=cokolwiek";
+        assert_eq!(normalize_until(r, home), r);
+    }
     use super::*;
 
     #[test]

@@ -116,6 +116,18 @@ fn parse_datetime(s: &str) -> Option<(NaiveDateTime, bool)> {
 /// (`Central European Standard Time`), których `chrono_tz` nie rozpozna — dla nich
 /// jest mała tablica najczęstszych przypadków. Nierozpoznana strefa zwraca `None`,
 /// a wołający traktuje wartość jako czas pływający.
+/// Osadza czas lokalny w strefie, wybierając najwcześniejsze sensowne odwzorowanie.
+///
+/// Przy przejściu na czas letni godzina bywa NIEISTNIEJĄCA, a przy powrocie —
+/// PODWÓJNA. `single()` zwraca wtedy `None`, a to za mało: wywołujący potrzebuje
+/// jakiegokolwiek poprawnego momentu, bo alternatywą jest odrzucenie całego
+/// wydarzenia. Ta sama zasada rządzi już parsowaniem `DTSTART` niżej w tym pliku.
+pub fn local_to_zoned(naive: NaiveDateTime, tz: Tz) -> Option<chrono::DateTime<Tz>> {
+    tz.from_local_datetime(&naive)
+        .earliest()
+        .or_else(|| tz.from_local_datetime(&naive).latest())
+}
+
 pub fn resolve_tz(tzid: &str) -> Option<Tz> {
     let tzid = tzid.trim().trim_matches('"');
 
