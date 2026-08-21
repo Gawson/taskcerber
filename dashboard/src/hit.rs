@@ -88,7 +88,10 @@ impl HitRegion {
         Self {
             rect,
             action,
-            visual: Some(Visual { rect: visual, radius }),
+            visual: Some(Visual {
+                rect: visual,
+                radius,
+            }),
         }
     }
 

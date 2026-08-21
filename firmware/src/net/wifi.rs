@@ -78,7 +78,10 @@ impl<'a> Wifi<'a> {
                     warn!("zapamiętany AP nie odpowiedział ({e:#}), unieważniam bufor");
                     state.invalidate_ap();
                     // Z limitem:  z esp-idf-svc czeka bez końca.
-                    Self::stop_bounded(&mut wifi, CONNECT_TIMEOUT.saturating_sub(started.elapsed()));
+                    Self::stop_bounded(
+                        &mut wifi,
+                        CONNECT_TIMEOUT.saturating_sub(started.elapsed()),
+                    );
                 }
             }
         }
@@ -180,7 +183,9 @@ impl<'a> Wifi<'a> {
         // że czas już minął. Potem było `ip_wait_while(..., Some(left))`, co też nie
         // pomogło, bo tamten „limit" jest limitem CISZY, nie terminem. Szczegóły
         // przy [`wait_bounded`], które jako jedyne trzyma tu prawdziwy termin.
-        wait_bounded(wifi, deadline, "uzyskanie adresu", |w| w.is_up().map(|up| !up))?;
+        wait_bounded(wifi, deadline, "uzyskanie adresu", |w| {
+            w.is_up().map(|up| !up)
+        })?;
         Ok(())
     }
 

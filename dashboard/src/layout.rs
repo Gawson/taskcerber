@@ -807,7 +807,9 @@ fn draw_setup_cta(fonts: &Fonts, c: &mut Gray8, screen: &mut Screen) {
 
     // Promień 14 zgadza się ze `stroke_round_rect` wyżej — bez tego przycisk zapalał
     // się pod palcem jako ostry prostokąt.
-    screen.hits.push(HitRegion::shaped(rect, Action::OpenSetup, rect, 14));
+    screen
+        .hits
+        .push(HitRegion::shaped(rect, Action::OpenSetup, rect, 14));
 }
 
 fn draw_empty_state(fonts: &Fonts, c: &mut Gray8) {
@@ -1199,7 +1201,12 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
     for (i, tile) in model.tiles.iter().take(n).enumerate() {
         let x = g.margin + i as i32 * (tw + gap);
 
-        let label = fonts.truncate(&tile.label.to_uppercase(), tw as f32, TEXT_BODY, Weight::Medium);
+        let label = fonts.truncate(
+            &tile.label.to_uppercase(),
+            tw as f32,
+            TEXT_BODY,
+            Weight::Medium,
+        );
         fonts.draw(
             c,
             &label,
@@ -1215,10 +1222,9 @@ fn draw_tiles(model: &Model, fonts: &Fonts, c: &mut Gray8, top: i32) {
         // tak wygląda ekran konfiguracji. Przy trzech kafelkach na 540 px kolumna ma
         // ~148 px, a „otwórz stronę" w 32 pt zajmuje 200 i wchodziła na sąsiada.
         // Najpierw więc schodzimy z rozmiarem, a dopiero gdy to nie starcza — ucinamy.
-        let unit_w = tile
-            .unit
-            .as_ref()
-            .map_or(0.0, |u| fonts.measure(u, TILE_UNIT_SIZE, TILE_UNIT_WEIGHT) + 6.0);
+        let unit_w = tile.unit.as_ref().map_or(0.0, |u| {
+            fonts.measure(u, TILE_UNIT_SIZE, TILE_UNIT_WEIGHT) + 6.0
+        });
         let room = (tw as f32 - unit_w).max(1.0);
 
         let mut size = TILE_VALUE_SIZE;
@@ -1487,11 +1493,7 @@ fn draw_setup_head(
         //
         // Warunkowo, nie na wszystkich: efekt ma być RÓŻNICOWY. Gdyby nieaktywne
         // rosły razem z aktywną, różnica by zniknęła.
-        let tab_weight = if active {
-            Weight::Bold
-        } else {
-            Weight::Medium
-        };
+        let tab_weight = if active { Weight::Bold } else { Weight::Medium };
         // Ten sam krój do mierzenia i do rysowania — rozjazd tej pary to dokładnie
         // ta klasa błędu, którą opisuje komentarz przy `TILE_UNIT_SIZE`.
         let label = fonts.truncate(&label, (tab_w - 12) as f32, tab_size, tab_weight);
@@ -1701,11 +1703,7 @@ fn draw_setup_summary(
         // Regular przy 20 px łamał regułę 2 na PIĘCIU z sześciu wierszy — zmierzone:
         // „Dom-WiFi-5GHz" miało 40% kresek jednopikselowych. Wiersz aktywny idzie
         // o stopień wyżej, żeby różnica została; nośnikiem jest krój, nie ton.
-        let weight = if active {
-            Weight::Bold
-        } else {
-            Weight::Medium
-        };
+        let weight = if active { Weight::Bold } else { Weight::Medium };
 
         fonts.draw(
             c,

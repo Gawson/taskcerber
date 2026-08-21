@@ -240,12 +240,7 @@ pub fn ink_level(v: u8) -> u8 {
 /// Rozkład uporządkowany: sąsiednie piksele dostają progi maksymalnie od siebie
 /// oddalone, więc wzór jest drobny i nie tworzy pasm. Szesnaście progów odwzorowuje
 /// dokładnie tyle gęstości, ile poziomów deklaruje panel.
-const BAYER4: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
+const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 /// Wypełnia prostokąt ditherem o gęstości `level`/16 czerni.
 ///
@@ -662,16 +657,26 @@ mod tests {
         // poziom 9 to zewnętrzna granica. Cokolwiek jaśniejszego jest bielą i nie
         // wolno tego użyć jako samodzielnego elementu.
         for (nazwa, v) in [("INK_DIM", INK_DIM), ("INK_FAINT", INK_FAINT)] {
-            assert!(v >> 4 <= 3, "{nazwa} = {v:#04X} jest poza zakresem atramentu");
+            assert!(
+                v >> 4 <= 3,
+                "{nazwa} = {v:#04X} jest poza zakresem atramentu"
+            );
         }
-        for (nazwa, v) in [("FILL_DARK", FILL_DARK), ("FILL", FILL), ("FILL_LIGHT", FILL_LIGHT)] {
+        for (nazwa, v) in [
+            ("FILL_DARK", FILL_DARK),
+            ("FILL", FILL),
+            ("FILL_LIGHT", FILL_LIGHT),
+        ] {
             let poziom = v >> 4;
             assert!(
                 (4..=8).contains(&poziom),
                 "{nazwa} = {v:#04X} jest poza zakresem wypełnień"
             );
         }
-        assert!(LIGHTEST_VISIBLE >> 4 <= 9, "granica widoczności przesunięta za wysoko");
+        assert!(
+            LIGHTEST_VISIBLE >> 4 <= 9,
+            "granica widoczności przesunięta za wysoko"
+        );
     }
 
     #[test]

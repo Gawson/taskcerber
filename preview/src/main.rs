@@ -376,14 +376,27 @@ fn scenario_rok() -> Model {
         }
         days.push(DayGroup {
             date: d,
-            events: (0..ile).map(|k| ev(d.day(), 8 + k as u32, 0, 9 + k as u32, 0, "x")).collect(),
+            events: (0..ile)
+                .map(|k| ev(d.day(), 8 + k as u32, 0, 9 + k as u32, 0, "x"))
+                .collect(),
         });
     }
     // Święta państwowe 2026 — bez nich nie da się ocenić czarnych kratek, a to
     // jedyne oznaczenie w tym widoku rysowane pełnym atramentem.
     for (mies, dzien) in [
-        (1u32, 1u32), (1, 6), (4, 5), (4, 6), (5, 1), (5, 3),
-        (5, 24), (6, 4), (8, 15), (11, 1), (11, 11), (12, 25), (12, 26),
+        (1u32, 1u32),
+        (1, 6),
+        (4, 5),
+        (4, 6),
+        (5, 1),
+        (5, 3),
+        (5, 24),
+        (6, 4),
+        (8, 15),
+        (11, 1),
+        (11, 11),
+        (12, 25),
+        (12, 26),
     ] {
         let d = chrono::NaiveDate::from_ymd_opt(2026, mies, dzien).unwrap();
         let mut e = ev(dzien, 0, 0, 23, 59, "święto");
@@ -391,7 +404,13 @@ fn scenario_rok() -> Model {
         e.source = dashboard::model::SourceTag::Holiday;
         match days.binary_search_by_key(&d, |g: &DayGroup| g.date) {
             Ok(i) => days[i].events.push(e),
-            Err(i) => days.insert(i, DayGroup { date: d, events: vec![e] }),
+            Err(i) => days.insert(
+                i,
+                DayGroup {
+                    date: d,
+                    events: vec![e],
+                },
+            ),
         }
     }
     m.days = days;

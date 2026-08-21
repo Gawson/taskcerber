@@ -642,7 +642,11 @@ fn fetch_everything(
     let mut any_ok = false;
     let mut last_error = None;
     for src in &sources {
-        krok!(&format!("pobieram {} · DRAM {} KB", src.name(), wolny_dram_kb()));
+        krok!(&format!(
+            "pobieram {} · DRAM {} KB",
+            src.name(),
+            wolny_dram_kb()
+        ));
         match src.fetch(from, to) {
             Ok(result) => {
                 crc ^= result.content_crc;
@@ -1197,16 +1201,15 @@ fn interactive_loop(
         // czyli każdy piksel obszaru dostaje impuls i wychodzi czarny niezależnie od
         // tego, co tam było.
         let slow_or_silent = matches!(action, Action::OpenSetup | Action::RefreshNow);
-        let flashed =
-            slow_or_silent
-                && flash_region(
-                    epd,
-                    &mut canvas,
-                    region.rect,
-                    region.visual,
-                    rotation,
-                    temperature_c,
-                );
+        let flashed = slow_or_silent
+            && flash_region(
+                epd,
+                &mut canvas,
+                region.rect,
+                region.visual,
+                rotation,
+                temperature_c,
+            );
         let mut repainted = false;
 
         match action {
@@ -1815,7 +1818,6 @@ const EXTRA_FULLCLEARS: u32 = 0;
 
 const BRING_UP_CARD: BringUpCard = BringUpCard::None;
 
-
 /// Jak długo urządzenie śpi po wyrysowaniu karty.
 ///
 /// E-papier trzyma obraz bez zasilania, więc karta zostaje na szkle przez cały sen
@@ -1982,9 +1984,8 @@ impl Button {
 /// liczba tuż przed nim mówi, ile marginesu naprawdę zostało.
 fn wolny_dram_kb() -> u32 {
     // SAFETY: prosty getter z ESP-IDF, bez stanu.
-    let bytes = unsafe {
-        esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL)
-    };
+    let bytes =
+        unsafe { esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL) };
     (bytes / 1024) as u32
 }
 

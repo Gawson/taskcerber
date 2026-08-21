@@ -300,9 +300,8 @@ impl Device {
                 //
                 // Stuknięcie w AKTYWNĄ zakładkę też tu wchodzi i to jest jego jedyne
                 // działanie: wyjście ze szczegółów na wierzch bieżącego widoku.
-                let zmiana = self.model.view != v
-                    || self.model.focus.is_some()
-                    || self.model.page != 0;
+                let zmiana =
+                    self.model.view != v || self.model.focus.is_some() || self.model.page != 0;
                 self.model.view = v;
                 self.model.focus = None;
                 self.model.page = 0;

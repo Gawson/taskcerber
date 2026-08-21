@@ -283,8 +283,6 @@ pub fn miesiac_mianownik(d: NaiveDate) -> &'static str {
     M[(d.month() as usize - 1).min(11)]
 }
 
-
-
 /// „18 sierpnia"
 pub fn data_dzien_miesiac(d: NaiveDate) -> String {
     format!("{} {}", d.day(), miesiac_dopelniacz(d))
@@ -446,5 +444,4 @@ mod tests {
         // Zapis z innej wersji firmware'u nie może wpaść w nieistniejący widok.
         assert_eq!(View::from_u8(200), View::Agenda);
     }
-
 }

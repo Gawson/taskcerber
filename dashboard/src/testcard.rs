@@ -251,8 +251,14 @@ mod tests {
         for rot in [Rotation::Portrait, Rotation::Landscape] {
             let mut c = Gray8::new(rot);
             let du = render_test_card(&fonts, &mut c);
-            assert!(du.x >= 0 && du.right() <= c.width() as i32, "{rot:?}: DU poza płótnem");
-            assert!(du.y >= 0 && du.bottom() <= c.height() as i32, "{rot:?}: DU poza płótnem");
+            assert!(
+                du.x >= 0 && du.right() <= c.width() as i32,
+                "{rot:?}: DU poza płótnem"
+            );
+            assert!(
+                du.y >= 0 && du.bottom() <= c.height() as i32,
+                "{rot:?}: DU poza płótnem"
+            );
             let atrament = c.pixels().iter().filter(|&&p| p != WHITE).count();
             assert!(atrament > 10_000, "{rot:?}: karta wyszła prawie pusta");
         }
@@ -453,4 +459,3 @@ pub fn render_uniformity_card(fonts: &Fonts, c: &mut Gray8) -> Rect {
 
     du
 }
-
