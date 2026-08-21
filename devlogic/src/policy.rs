@@ -136,6 +136,52 @@ impl Policy {
         !matches!(mode, Mode::Hold)
     }
 
+    /// Nominalny odstęp między pobraniami w danym trybie.
+    pub fn interval_s(&self, mode: Mode) -> u64 {
+        match mode {
+            Mode::Usb => self.usb_interval_s,
+            Mode::Active | Mode::Night => self.active_interval_s,
+            Mode::Frugal => self.frugal_interval_s,
+            Mode::Survival | Mode::Hold => self.survival_interval_s,
+        }
+    }
+
+    /// Czy dane są na tyle stare, żeby warto było po nie sięgnąć.
+    ///
+    /// # Po co to w ogóle jest
+    ///
+    /// [`Policy::should_fetch`] patrzy wyłącznie na TRYB, nigdy na czas — a odstęp
+    /// między pobraniami wynikał do tej pory tylko z tego, jak długo urządzenie
+    /// spało. Wybudzenie przez CZŁOWIEKA omijało więc ten odstęp w całości:
+    /// dotknięcie ekranu sekundę po pobraniu ściągało kanał od nowa. Przy kanale
+    /// ważącym 1,18 MB to kilkanaście sekund, w trakcie których panel jeszcze nie
+    /// istnieje (nie może — konkuruje o DRAM z mbedTLS), więc ekran stoi z markerem
+    /// uśpienia, a dotyku nikt nie czyta. Człowiek widzi urządzenie, które go
+    /// zignorowało, i naciska cokolwiek innego.
+    ///
+    /// Świeżość mierzymy od OSTATNIEGO UDANEGO pobrania, bo tylko ono coś zmieniło.
+    ///
+    /// # Tolerancja
+    ///
+    /// Wybudzenie timerem wypada nominalnie po `interval_s`, ale zegar dryfuje,
+    /// a `align_to_minute` przesuwa moment o kilkadziesiąt sekund. Bez marginesu
+    /// pobranie wypadałoby czasem o sekundę za wcześnie i przesuwało się o CAŁY
+    /// interwał — kalendarz odświeżałby się co drugi cykl zamiast co cykl.
+    pub fn fetch_is_due(&self, mode: Mode, now_unix: i64, last_success_unix: i64) -> bool {
+        // Nigdy nic nie pobraliśmy — nie ma czego oszczędzać.
+        if last_success_unix <= 0 {
+            return true;
+        }
+        let elapsed = now_unix - last_success_unix;
+        // Zegar cofnięty (SNTP poprawił dryf w tył, wymiana ogniwa RTC). Wtedy
+        // wiek danych jest nieznany, a nieznany wiek traktujemy jak stary.
+        if elapsed < 0 {
+            return true;
+        }
+        const TOLERANCJA_S: i64 = 90;
+        elapsed >= self.interval_s(mode) as i64 - TOLERANCJA_S
+    }
+
     /// Czy w tym trybie wolno pobrać aktualizację firmware'u.
     ///
     /// Pobranie ~3 MB przez HTTPS trzyma radio na antenie o rząd wielkości dłużej
@@ -169,6 +215,75 @@ pub fn align_to_minute(now: NaiveDateTime, seconds: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Wybudzenie przez człowieka nie może ściągać kanału od nowa sekundę po
+    /// poprzednim pobraniu — to jest te kilkanaście sekund, przez które urządzenie
+    /// wygląda, jakby zignorowało dotknięcie.
+    #[test]
+    fn swieze_dane_nie_sa_pobierane_ponownie() {
+        let p = Policy::default();
+        let teraz = 1_000_000i64;
+        let interwal = p.usb_interval_s as i64;
+
+        assert!(
+            !p.fetch_is_due(Mode::Usb, teraz, teraz - 1),
+            "pobranie sprzed sekundy jest świeże"
+        );
+        assert!(
+            !p.fetch_is_due(Mode::Usb, teraz, teraz - interwal / 2),
+            "połowa interwału to wciąż świeżo"
+        );
+        assert!(
+            p.fetch_is_due(Mode::Usb, teraz, teraz - interwal),
+            "po pełnym interwale pobieramy"
+        );
+        assert!(
+            p.fetch_is_due(Mode::Usb, teraz, teraz - 10 * interwal),
+            "dane sprzed godzin są bezdyskusyjnie stare"
+        );
+    }
+
+    /// Tolerancja istnieje po to, żeby wybudzenie o sekundę za wczesne nie przesuwało
+    /// pobrania o CAŁY interwał — inaczej kalendarz odświeżałby się co drugi cykl.
+    #[test]
+    fn wybudzenie_odrobine_za_wczesne_wciaz_pobiera() {
+        let p = Policy::default();
+        let teraz = 1_000_000i64;
+        let interwal = p.usb_interval_s as i64;
+        assert!(
+            p.fetch_is_due(Mode::Usb, teraz, teraz - interwal + 60),
+            "minuta przed czasem to dryf zegara, nie świeże dane"
+        );
+    }
+
+    /// Brak historii i cofnięty zegar znaczą „nie wiem, ile to ma lat" — a nieznany
+    /// wiek traktujemy jak stary, bo pusty ekran jest gorszy niż jedno pobranie.
+    #[test]
+    fn nieznany_wiek_danych_znaczy_stary() {
+        let p = Policy::default();
+        assert!(p.fetch_is_due(Mode::Usb, 1_000_000, 0), "nigdy nie pobrano");
+        assert!(
+            p.fetch_is_due(Mode::Usb, 1_000_000, 2_000_000),
+            "zegar cofnięty"
+        );
+    }
+
+    /// Każdy tryb ma swój interwał i żaden nie może przypadkiem zwrócić zera —
+    /// zero znaczyłoby pobieranie przy każdym wybudzeniu, czyli stan sprzed poprawki.
+    #[test]
+    fn kazdy_tryb_ma_niezerowy_interwal() {
+        let p = Policy::default();
+        for mode in [
+            Mode::Usb,
+            Mode::Active,
+            Mode::Night,
+            Mode::Frugal,
+            Mode::Survival,
+            Mode::Hold,
+        ] {
+            assert!(p.interval_s(mode) > 0, "{mode:?} ma zerowy interwał");
+        }
+    }
     use super::*;
     use chrono::NaiveDate;
 

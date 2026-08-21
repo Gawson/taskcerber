@@ -35,6 +35,9 @@ const TOUCH_RST: i32 = 9;
 /// Przerwanie kontrolera dotyku. Pin w domenie RTC, więc **może** budzić z deep sleepu.
 const TOUCH_INT: i32 = 3;
 
+/// Przycisk BOOT — drugie źródło `ext1`, obok `TOUCH_INT`.
+const BOOT_BTN: i32 = 0;
+
 /// Zdejmuje zatrzaski GPIO założone przed snem. **Woła się przy każdym starcie,
 /// przed dotknięciem panelu i przed sekwencją resetu dotyku.**
 ///
@@ -78,6 +81,32 @@ const TOUCH_INT: i32 = 3;
 /// Firmware vendora robi to samo w pierwszych trzech liniach `setup()`:
 /// `gpio_hold_dis(BOARD_TOUCH_RST); gpio_hold_dis(BOARD_LORA_RST); gpio_deep_sleep_hold_dis();`
 pub fn release_pin_holds() {
+    // Piny źródeł `ext1` — osobno i INNYM wywołaniem, bo mają inny problem niż reszta.
+    //
+    // `ext1_wakeup_prepare` w ESP-IDF przestawia KAŻDY pin z maski na funkcję RTC
+    // (`rtcio_hal_function_select`), a że usypiamy z RTC_PERIPH wyłączoną, dokłada
+    // do tego `rtcio_hal_hold_enable`. Oba piny wracają więc z deep sleepu
+    // przemuxowane na RTC i zatrzaśnięte — a na tej liście ich do tej pory NIE BYŁO.
+    //
+    // Samo `hold_dis` by nie wystarczyło: zatrzask schodzi, ale mux zostaje na RTC,
+    // dopóki ktoś nie zawoła `rtc_gpio_deinit` — a robi to dopiero `gpio_reset_pin`.
+    // To ta sama para wywołań, której używa `gt911::reset_sequence`, i ta sama
+    // pułapka, którą opisuje `docs/hardware.md` §5b.
+    //
+    // Skutek pominięcia był podstępny: próbka `T_INT` w [`enable_wakeup`] czytała
+    // pad odcięty od ścieżki cyfrowej, dostawała fałszywe zero i po cichu WYCINAŁA
+    // dotyk z maski wybudzeń. Od tej chwili budził wyłącznie BOOT, a dotyk wracał
+    // dopiero po cyklu, w którym otworzyło się okno dotyku — bo dopiero ono woła
+    // sekwencję resetu GT911 i przy okazji odkręca GPIO3. Z zewnątrz wyglądało to
+    // jak „trzeba raz albo dwa razy wdusić BOOT, żeby zaczął reagować".
+    for pin in [BOOT_BTN, TOUCH_INT] {
+        // SAFETY: numery pinów stałe, oba w domenie RTC, wywołania bezstanowe.
+        unsafe {
+            sys::gpio_hold_dis(pin);
+            sys::gpio_reset_pin(pin);
+        }
+    }
+
     for pin in EPD_PINS.into_iter().chain([BL_EN, TOUCH_RST]) {
         // SAFETY: numery pinów są stałe i poprawne dla tej płytki. Dla pinów spoza
         // domeny RTC `gpio_hold_dis` zwraca błąd, który tu nie ma znaczenia — te piny
@@ -236,8 +265,7 @@ pub fn deep_sleep_for(seconds: u64) -> ! {
 /// `keep_touch_alive` musi być zgodne z tym, co dostał [`prepare_for_deep_sleep`] —
 /// kontroler trzymany w resecie nie ma czym przerwać.
 pub fn enable_wakeup(keep_touch_alive: bool) -> Result<()> {
-    const BOOT: u64 = 1 << 0;
-    let mut mask = BOOT;
+    let mut mask = 1u64 << BOOT_BTN;
 
     if keep_touch_alive {
         // Podciągnięcie, zanim cokolwiek odczytamy. Bez niego `T_INT` bywa pinem

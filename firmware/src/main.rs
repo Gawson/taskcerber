@@ -259,7 +259,16 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Dotknięcie „odśwież" w poprzednim cyklu wymusza pobranie niezależnie od trybu,
     // także w nocy. Flagę zdejmujemy tutaj, a nie po udanym pobraniu: gdyby sieć
     // zawiodła, powtarzanie życzenia sprzed godziny nie jest już tym, o co ktoś prosił.
-    } else if requested || (policy.should_fetch(mode) && !matches!(mode, Mode::Night)) {
+    // `fetch_is_due` dokłada do warunku ŚWIEŻOŚĆ, której do tej pory nie było.
+    // Bez niej wybudzenie dotykiem ściągało kanał od nowa niezależnie od tego, że
+    // pobraliśmy go przed chwilą — a to jest te kilkanaście sekund, w których panel
+    // jeszcze nie istnieje i dotyku nikt nie czyta. Żądanie użytkownika
+    // (`RefreshNow`) omija ten warunek celowo: „odśwież teraz" ma znaczyć teraz.
+    } else if requested
+        || (policy.should_fetch(mode)
+            && policy.fetch_is_due(mode, net::time::now_unix(), state.last_success_unix)
+            && !matches!(mode, Mode::Night))
+    {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
         let mut trace = (epd_early.is_some() && power_status.usb_present)
             .then(|| NetTrace::begin(rotation, temperature));
