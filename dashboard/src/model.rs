@@ -86,6 +86,23 @@ pub struct Model {
     ///
     /// `None` = urządzenie nic nie pobrało; wtedy nie wie nic o żadnym dniu.
     pub known: Option<(NaiveDate, NaiveDate)>,
+    /// O które dni zapytał kanał ŚWIĄT — osobno od [`Model::known`], bo ma inny
+    /// horyzont: kanał z treścią sięga dwóch tygodni, kanał świąt całego roku.
+    ///
+    /// Jeden wspólny zakres byłby kłamstwem w obie strony: albo kalendarz roczny
+    /// twierdziłby, że zna święta na cały rok, gdy zna je z dwóch tygodni, albo
+    /// widok miesięczny udawałby, że wie o dniach, o które nikt nie pytał.
+    pub known_holidays: Option<(NaiveDate, NaiveDate)>,
+    /// Dni świąteczne całego roku — same daty, posortowane.
+    ///
+    /// Osobno od [`Model::days`] i to jest konieczne, a nie porządkowe. Kanał świąt
+    /// ma roczny horyzont, więc wrzucenie go do `days` sprawiłoby, że agenda
+    /// w sierpniu listuje 25 grudnia, a widok miesięczny rysuje pasek gęstości
+    /// w kratce, którą sam oznaczył rastrem „nie pytałem o ten dzień".
+    ///
+    /// Święta BLISKIE trafiają normalnie także do `days` — w agendzie i w miesiącu
+    /// mają się pojawiać jak każde inne wydarzenie całodniowe.
+    pub holidays: Vec<NaiveDate>,
     /// Który widok jest na ekranie.
     pub view: View,
 }
@@ -102,6 +119,8 @@ impl Model {
             firmware: String::new(),
             page: 0,
             known: None,
+            known_holidays: None,
+            holidays: Vec::new(),
             focus: None,
             view: View::default(),
         }
@@ -443,5 +462,27 @@ mod tests {
         }
         // Zapis z innej wersji firmware'u nie może wpaść w nieistniejący widok.
         assert_eq!(View::from_u8(200), View::Agenda);
+    }
+    /// Święta i treść mają rozdzielone zakresy wiedzy, bo mają rozdzielone
+    /// horyzonty. Wspólne pole kłamałoby w jedną albo w drugą stronę.
+    #[test]
+    fn zakresy_wiedzy_sa_niezalezne() {
+        let mut m = Model::empty(
+            NaiveDate::from_ymd_opt(2026, 8, 18)
+                .unwrap()
+                .and_hms_opt(7, 0, 0)
+                .unwrap(),
+        );
+        assert_eq!(m.known, None);
+        assert_eq!(m.known_holidays, None);
+        assert!(m.holidays.is_empty());
+
+        let d = |dz, mi| NaiveDate::from_ymd_opt(2026, mi, dz).unwrap();
+        m.known = Some((d(18, 8), d(31, 8)));
+        m.known_holidays = Some((d(1, 1), d(31, 12)));
+        assert_ne!(
+            m.known, m.known_holidays,
+            "zakres treści nie może być tym samym co zakres świąt"
+        );
     }
 }

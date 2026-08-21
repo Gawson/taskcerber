@@ -61,7 +61,7 @@ impl Field {
             Field::Ssid => "sieć",
             Field::Password => "hasło",
             Field::Ics => "iCal",
-            Field::Ics2 => "iCal 2",
+            Field::Ics2 => "święta",
             Field::Timezone => "strefa",
             Field::Ota => "OTA",
         }
@@ -73,7 +73,7 @@ impl Field {
             Field::Ssid => "nazwa sieci WiFi",
             Field::Password => "hasło WiFi",
             Field::Ics => "adres kalendarza (iCal)",
-            Field::Ics2 => "drugi kalendarz — opcjonalny",
+            Field::Ics2 => "kalendarz świąt — opcjonalny",
             Field::Timezone => "strefa czasowa",
             Field::Ota => "manifest aktualizacji — opcjonalny",
         }
@@ -85,7 +85,7 @@ impl Field {
             Field::Ssid => "dokładnie tak, jak widać na liście sieci",
             Field::Password => "puste = sieć otwarta",
             Field::Ics => "https://calendar.google.com/calendar/ical/…/basic.ics",
-            Field::Ics2 => "np. święta albo kalendarz współdzielony",
+            Field::Ics2 => "pobierany na cały rok, nie na dwa tygodnie",
             Field::Timezone => "puste = Europe/Warsaw",
             Field::Ota => "puste = aktualizacje wyłączone",
         }

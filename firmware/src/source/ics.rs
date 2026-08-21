@@ -34,15 +34,25 @@ pub struct IcsSource {
     home: Tz,
     tag: SourceTag,
     label: String,
+    /// Ile dni do przodu pobierać z tego konkretnego kanału — patrz
+    /// [`crate::source::EventSource::horizon_days`].
+    horizon_days: i64,
 }
 
 impl IcsSource {
-    pub fn new(url: impl Into<String>, home: Tz, tag: SourceTag, label: impl Into<String>) -> Self {
+    pub fn new(
+        url: impl Into<String>,
+        home: Tz,
+        tag: SourceTag,
+        label: impl Into<String>,
+        horizon_days: i64,
+    ) -> Self {
         Self {
             url: url.into(),
             home,
             tag,
             label: label.into(),
+            horizon_days,
         }
     }
 }
@@ -50,6 +60,10 @@ impl IcsSource {
 impl EventSource for IcsSource {
     fn name(&self) -> &str {
         &self.label
+    }
+
+    fn horizon_days(&self) -> i64 {
+        self.horizon_days
     }
 
     fn fetch(&self, from: NaiveDateTime, to: NaiveDateTime) -> Result<FetchResult> {

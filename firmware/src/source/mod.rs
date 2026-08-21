@@ -18,6 +18,15 @@ pub trait EventSource {
 
     /// Pobiera wydarzenia z okna `[from, to)`.
     fn fetch(&self, from: NaiveDateTime, to: NaiveDateTime) -> Result<FetchResult>;
+
+    /// Ile dni do przodu ma sens pobierać z TEGO źródła.
+    ///
+    /// Horyzont jest własnością źródła, a nie globalną stałą, bo źródła różnią się
+    /// o rząd wielkości. Kalendarz z treścią daje przy roku ~1500 wydarzeń i ponad
+    /// 100 KB w PSRAM-ie, więc trzyma się dwóch tygodni. Kanał świąt to ~13 wydarzeń
+    /// całodniowych rocznie, bez reguł powtarzania — pobieranie go na czternaście dni
+    /// znaczyłoby, że kalendarz roczny pokazuje święta z dwóch tygodni i pusty listopad.
+    fn horizon_days(&self) -> i64;
 }
 
 /// Wynik pobrania.

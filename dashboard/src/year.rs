@@ -41,18 +41,24 @@
 //! zalewką, więc czyta się z drugiego końca pokoju. Negatyw idzie `Bold`, reguła 4
 //! z nagłówka [`crate::layout`].
 //!
-//! **Święta znamy tylko z pobranego okna.** Sama siatka dat liczy się z kalendarza
-//! i obowiązuje cały rok, ale święto jest wydarzeniem — przychodzi z kanału ICS
-//! i sięga tak daleko, jak `HORIZON_DAYS`. Przy dzisiejszych czternastu dniach ten
-//! ekran pokaże strukturę całego roku i święta z dwóch tygodni. Stopka mówi to
-//! wprost, zamiast udawać, że listopad jest bez świąt.
+//! **Święta mają własny horyzont.** Sama siatka dat liczy się z kalendarza i
+//! obowiązuje cały rok; święto jest wydarzeniem i musi przyjść z kanału ICS. Kanał
+//! świąt pobierany jest więc na **cały rok**, a nie na czternaście dni co kanał
+//! z treścią — kosztuje to tyle co nic, bo to ~13 wydarzeń całodniowych bez reguł
+//! powtarzania. Mechanizm siedzi w `EventSource::horizon_days`.
+//!
+//! Dlatego ten widok czyta [`Model::holidays`], a nie `Model::days`: w `days`
+//! leży wyłącznie horyzont treści, żeby agenda w sierpniu nie listowała 25 grudnia.
+//! Zasięg wiedzy o świętach niesie [`Model::known_holidays`] i mówi go stopka —
+//! przy nieskonfigurowanym kanale świąt ekran przyzna, że ich nie zna, zamiast
+//! udawać, że listopad jest bez świąt.
 
 use chrono::{Datelike, NaiveDate};
 
 use crate::canvas::{Gray8, Rect, BLACK, INK_DIM, WHITE};
 use crate::hit::Screen;
 use crate::layout::{TEXT_BODY, TEXT_FLOOR, TEXT_HEAD};
-use crate::model::{Model, SourceTag};
+use crate::model::Model;
 use crate::shapes::{hline, stroke_round_rect};
 use crate::text::{Align, Fonts, Weight};
 
@@ -160,16 +166,14 @@ impl Plan {
 
 /// Dni roku będące świętami, indeksowane `[miesiąc-1][dzień-1]`.
 ///
-/// Tylko `SourceTag::Holiday`. Spotkanie w kalendarzu głównym nie ma tu czego szukać
-/// — ten ekran z założenia nic nie mówi o zajętości.
+/// Czytamy [`Model::holidays`], a nie `days`: tam leży pełny rok świąt, podczas gdy
+/// `days` sięga horyzontu treści, czyli dwóch tygodni. Zajętość nie ma tu wstępu —
+/// ten ekran z założenia nic o niej nie mówi.
 fn swieta(model: &Model, year: i32) -> [[bool; 31]; MONTHS] {
     let mut out = [[false; 31]; MONTHS];
-    for day in &model.days {
-        if day.date.year() != year {
-            continue;
-        }
-        if day.events.iter().any(|e| e.source == SourceTag::Holiday) {
-            out[(day.date.month() - 1) as usize][(day.date.day() - 1) as usize] = true;
+    for d in &model.holidays {
+        if d.year() == year {
+            out[(d.month() - 1) as usize][(d.day() - 1) as usize] = true;
         }
     }
     out
@@ -205,7 +209,7 @@ pub fn render_year(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
 
     // --- stopka ------------------------------------------------------------
     let foot = body_h(c) - 12;
-    let podpis = match crate::month::covered_range(model) {
+    let podpis = match model.known_holidays {
         Some((a, z)) => format!(
             "święta znane {}.{:02}–{}.{:02} · siatka dat obowiązuje cały rok",
             a.day(),
@@ -360,7 +364,7 @@ pub(crate) fn dni_miesiaca(year: i32, month: u32) -> i32 {
 mod tests {
     use super::*;
     use crate::canvas::Rotation;
-    use crate::model::{CalEvent, DayGroup};
+    use crate::model::{CalEvent, DayGroup, SourceTag};
 
     fn model_na(rok: i32, mies: u32, dzien: u32) -> Model {
         Model::empty(
@@ -475,12 +479,13 @@ mod tests {
         let nowy_rok = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
 
         let mut ze_swietem = model_na(2026, 6, 15);
-        ze_swietem.days = vec![wydarzenie(nowy_rok, SourceTag::Holiday)];
+        ze_swietem.holidays = vec![nowy_rok];
         let mut c1 = Gray8::new(Rotation::Portrait);
         render_year(&ze_swietem, &fonts, &mut c1);
 
         let mut ze_spotkaniem = model_na(2026, 6, 15);
         ze_spotkaniem.days = vec![wydarzenie(nowy_rok, SourceTag::Primary)];
+        // Ten sam dzień, ale jako spotkanie — kratka ma zostać pusta.
         let mut c2 = Gray8::new(Rotation::Portrait);
         render_year(&ze_spotkaniem, &fonts, &mut c2);
 

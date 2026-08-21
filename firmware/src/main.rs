@@ -69,6 +69,13 @@ const VERSION: &str = env!("T5_VERSION");
 /// Ile dni do przodu pokazujemy.
 const HORIZON_DAYS: i64 = 14;
 
+/// Horyzont kanału świąt — pełny rok z zapasem na przestępny.
+///
+/// Tyle wolno, bo święta to ~13 wydarzeń całodniowych rocznie, bez reguł
+/// powtarzania, więc `MAX_OCCURRENCES` ich nie obcina, a pamięci zajmują tyle co nic.
+/// Kalendarz roczny bez tego pokazywałby święta z dwóch tygodni i pusty listopad.
+const HOLIDAY_HORIZON_DAYS: i64 = 366;
+
 /// Jak krótko śpimy po dotknięciu „odśwież".
 ///
 /// Pobranie wymaga radia, a radia nie wolno podnosić przy podniesionych szynach
@@ -211,6 +218,8 @@ fn run(mut state: RtcState) -> Result<u64> {
 
     let mut net_state = NetState::Ok;
     let mut events = Vec::new();
+    let mut known: Option<(NaiveDate, NaiveDate)> = None;
+    let mut known_holidays: Option<(NaiveDate, NaiveDate)> = None;
     // CRC treści, która JEST na szkle. Trzymamy je osobno, bo `record_success`
     // nadpisuje `state.last_content_crc` zaraz po udanym pobraniu — porównanie
     // z polem stanu byłoby wtedy porównaniem wartości z samą sobą.
@@ -293,6 +302,8 @@ fn run(mut state: RtcState) -> Result<u64> {
 
                 content_crc = out.crc;
                 events = out.events;
+                known = out.known;
+                known_holidays = out.known_holidays;
                 fetched = true;
                 state.record_success(net::time::now_unix(), content_crc);
             }
@@ -388,7 +399,15 @@ fn run(mut state: RtcState) -> Result<u64> {
 
     if needs_paint || interact {
         let mut model = if config.is_provisioned() {
-            build_model(now, events, fuel, power_status.usb_present, net_state)
+            build_model(
+                now,
+                events,
+                fuel,
+                power_status.usb_present,
+                net_state,
+                known,
+                known_holidays,
+            )
         } else {
             provisioning_model(now, fuel, power_status.usb_present)
         };
@@ -624,6 +643,10 @@ impl NetTrace {
 struct Fetched {
     events: Vec<dashboard::model::CalEvent>,
     crc: u32,
+    /// O które dni zapytał kanał z treścią. `None` = nie udało się go pobrać.
+    known: Option<(NaiveDate, NaiveDate)>,
+    /// O które dni zapytał kanał świąt — osobno, bo ma inny horyzont.
+    known_holidays: Option<(NaiveDate, NaiveDate)>,
     /// Nowy obraz leży już w wolnym slocie i slot startowy jest przestawiony.
     /// Wołający ma zrestartować — ale dopiero wtedy, gdy uzna, że wolno.
     ota_installed: bool,
@@ -687,7 +710,6 @@ fn fetch_everything(
 
     let now = net::time::now_local(home_tz).unwrap_or(now);
     let from = now.date().and_hms_opt(0, 0, 0).unwrap_or(now);
-    let to = from + ChronoDuration::days(HORIZON_DAYS);
 
     let mut events = Vec::new();
     let mut crc = 0u32;
@@ -699,19 +721,27 @@ fn fetch_everything(
             home_tz,
             SourceTag::Primary,
             "kalendarz główny",
+            HORIZON_DAYS,
         ));
     }
+    // Drugi kanał jest kanałem ŚWIĄT: tag `Holiday` i roczny horyzont. Jego opis
+    // w konfiguracji od początku brzmiał „np. święta albo kalendarz współdzielony",
+    // a święta są jedyną treścią, która ma sens na całym roku i jednocześnie nic
+    // nie kosztuje. Kalendarz roczny czyta wyłącznie ten tag.
     if let Some(url) = &config.ics_url_secondary {
         sources.push(IcsSource::new(
             url,
             home_tz,
-            SourceTag::Secondary,
-            "kalendarz dodatkowy",
+            SourceTag::Holiday,
+            "kalendarz świąt",
+            HOLIDAY_HORIZON_DAYS,
         ));
     }
 
     let mut any_ok = false;
     let mut last_error = None;
+    let mut known = None;
+    let mut known_holidays = None;
     for (i, src) in sources.iter().enumerate() {
         okruszek!(if i == 0 {
             BootStep::FetchPrimary
@@ -723,11 +753,23 @@ fn fetch_everything(
             src.name(),
             wolny_dram_kb()
         ));
+        // Okno liczone POD ŹRÓDŁO — to jest cały sens `horizon_days`.
+        let to = from + ChronoDuration::days(src.horizon_days());
         match src.fetch(from, to) {
             Ok(result) => {
                 crc ^= result.content_crc;
                 events.extend(result.events);
                 any_ok = true;
+                // O które dni to źródło faktycznie zapytało. Bez tego widoki
+                // rastrują całą siatkę jako „nie wiem" — a `Model::known`
+                // NIE BYŁO dotąd w ogóle ustawiane, więc tak właśnie wyglądało
+                // to na urządzeniu.
+                let zakres = (from.date(), (to - ChronoDuration::days(1)).date());
+                if src.horizon_days() > HORIZON_DAYS {
+                    known_holidays = Some(zakres);
+                } else {
+                    known = Some(zakres);
+                }
             }
             Err(e) => {
                 warn!("źródło `{}` zawiodło: {e:#}", src.name());
@@ -770,16 +812,21 @@ fn fetch_everything(
     Ok(Fetched {
         events,
         crc,
+        known,
+        known_holidays,
         ota_installed,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_model(
     now: NaiveDateTime,
     events: Vec<dashboard::model::CalEvent>,
     fuel: board::bq27220::Fuel,
     charging: bool,
     net: NetState,
+    known: Option<(NaiveDate, NaiveDate)>,
+    known_holidays: Option<(NaiveDate, NaiveDate)>,
 ) -> Model {
     let mut model = Model::empty(now);
     model.firmware = format!("t5s3pro {VERSION}");
@@ -789,7 +836,34 @@ fn build_model(
         charging,
     };
     model.net = net;
-    model.days = group_by_day(events);
+
+    // Rozdział jest wymuszony różnymi horyzontami. Kanał świąt sięga roku, kanał
+    // z treścią dwóch tygodni — gdyby wszystko poszło do `days`, agenda w sierpniu
+    // listowałaby 25 grudnia, a miesiąc rysowałby pasek w kratce oznaczonej rastrem
+    // „nie pytałem o ten dzień".
+    let mut holidays: Vec<NaiveDate> = events
+        .iter()
+        .filter(|e| e.source == SourceTag::Holiday)
+        .map(|e| e.start.date())
+        .collect();
+    holidays.sort_unstable();
+    holidays.dedup();
+    model.holidays = holidays;
+
+    // Do `days` tylko to, co mieści się w horyzoncie TREŚCI. Bliskie święta
+    // przechodzą przez to sito i pojawiają się w agendzie jak każde inne
+    // wydarzenie całodniowe — i o to chodzi.
+    let koniec = now.date() + ChronoDuration::days(HORIZON_DAYS);
+    let bliskie: Vec<_> = events
+        .into_iter()
+        .filter(|e| e.start.date() < koniec)
+        .collect();
+    model.days = group_by_day(bliskie);
+    // Te dwa zakresy to jedyne, co odróżnia „wolny dzień" od „nie pytałem o ten
+    // dzień". Do tej pory NIE BYŁY ustawiane w ogóle, więc widok miesięczny
+    // rastrował na urządzeniu całą siatkę jako niewiadomą.
+    model.known = known;
+    model.known_holidays = known_holidays;
     model
 }
 

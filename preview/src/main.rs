@@ -375,13 +375,10 @@ fn scenario_miesiac() -> Model {
 /// jak by wyglądał, gdyby dane były.
 fn scenario_rok() -> Model {
     let mut m = base(dt(18, 7, 15));
-    let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-    let mut days: Vec<DayGroup> = Vec::new();
 
-    // Święta państwowe 2026. Tylko one — widok roczny z założenia nic nie mówi
-    // o zajętości, więc scenariusz z setkami spotkań pokazywałby wyłącznie to,
-    // że są ignorowane, i mylił co do tego, co ten ekran robi.
-    for (mies, dzien) in [
+    // Święta państwowe 2026, w tym ruchome liczone od Wielkanocy (5 kwietnia):
+    // Poniedziałek Wielkanocny 6.04, Zielone Świątki 24.05, Boże Ciało 4.06.
+    let daty = [
         (1u32, 1u32),
         (1, 6),
         (4, 5),
@@ -395,22 +392,14 @@ fn scenario_rok() -> Model {
         (11, 11),
         (12, 25),
         (12, 26),
-    ] {
-        let d = chrono::NaiveDate::from_ymd_opt(2026, mies, dzien).unwrap();
-        let mut e = ev(dzien, 0, 0, 23, 59, "święto");
-        e.all_day = true;
-        e.source = dashboard::model::SourceTag::Holiday;
-        days.push(DayGroup {
-            date: d,
-            events: vec![e],
-        });
-    }
+    ];
+    m.holidays = daty
+        .iter()
+        .map(|&(mies, d)| chrono::NaiveDate::from_ymd_opt(2026, mies, d).unwrap())
+        .collect();
 
-    m.days = days;
-    // Pełny rok świąt wymaga rocznego horyzontu dla kanału świąt. Dziś horyzont
-    // jest jeden dla wszystkich źródeł i wynosi 14 dni — ten scenariusz pokazuje,
-    // jak ekran wygląda PO tej zmianie, a nie jak wygląda dzisiaj.
-    m.known = Some((start, start + chrono::Duration::days(364)));
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    m.known_holidays = Some((start, start + chrono::Duration::days(364)));
     m.view = dashboard::View::Year;
     m
 }
