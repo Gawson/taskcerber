@@ -153,10 +153,23 @@ CONFIG_LWIP_ESP_GRATUITOUS_ARP=n
 
 #--- Stosy (std Rust potrzebuje więcej niż C) ----------------------------------
 # 64 KB, podniesione z 32 KB po stack overflow w parsowaniu kanału 1,18 MB.
-# To jest BUFOR NA CZAS POMIARU, a nie diagnoza: 32 KB powinno wystarczyć parserowi
-# strumieniowemu, więc jeśli coś zjada więcej, to jest tam błąd, a nie potrzeba.
-# Log wypisuje teraz zapas stosu przy „pobieram" i „pobrane" — po tych liczbach
-# będzie widać, ile realnie schodzi i czy da się wrócić do 32 KB.
+#
+# ZMIERZONE NA SPRZĘCIE, uxTaskGetStackHighWaterMark w czterech punktach cyklu:
+#   pobieram          46652 B wolne
+#   pobrane           45036 B      -> transport i mbedTLS: ~1,6 KB
+#   parsuję bez radia 45036 B
+#   sparsowane        25036 B      -> parsowanie i rozwijanie reguł: 20,0 KB
+# Szczyt zużycia: 65536 - 25036 = 40,5 KB.
+#
+# Przy 32 KB brakowało 8,5 KB i przepełnienie było nieuniknione. Zużycie jest
+# OGRANICZONE I POWTARZALNE — to nie jest rozbiegająca się rekursja, tylko tyle,
+# ile ten parser potrzebuje. Dlatego 64 KB jest naprawą, a nie zamiataniem;
+# zapas nad zmierzonym szczytem wynosi 25 KB.
+#
+# Cena: 32 KB wewnętrznego DRAM-u zabrane ze sterty na stałe. Log pokazuje przy
+# pobieraniu 157 KB wolnego, więc mieści się, ale to jest ten sam DRAM, o który
+# biją się mbedTLS i epdiy — przy dokładaniu czegokolwiek do kroku sieciowego
+# porównuj te liczby.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
