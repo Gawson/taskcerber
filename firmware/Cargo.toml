@@ -1,5 +1,5 @@
 [package]
-name = "t5s3pro"
+name = "taskcerber"
 version = "0.1.0"
 edition = "2021"
 resolver = "2"
@@ -8,7 +8,7 @@ description = "Kalendarzowy dashboard e-papierowy na LilyGo T5 E-Paper S3 Pro"
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "t5s3pro"
+name = "taskcerber"
 harness = false          # na targecie nie ma libtest
 
 [dependencies]

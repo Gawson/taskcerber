@@ -1,4 +1,4 @@
-# t5s3pro — kalendarz na e-papierze
+# taskcerber — kalendarz na e-papierze
 
 Firmware w Ruście dla **LilyGo T5 E-Paper S3 Pro**: pobiera kalendarz Google przez
 HTTPS, rysuje go na panelu 960×540 w 16 odcieniach szarości i śpi. Wgrywa się

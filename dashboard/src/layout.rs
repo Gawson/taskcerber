@@ -2398,7 +2398,7 @@ mod tests {
     fn wersja_w_stopce_otwiera_konfiguracje() {
         let fonts = Fonts::embedded();
         let mut model = Model::empty(dt(12, 0));
-        model.firmware = "t5s3pro 0.1.0+gabc1234".to_string();
+        model.firmware = "taskcerber 0.1.0+gabc1234".to_string();
         let mut c = Gray8::new(Rotation::Portrait);
         let screen = render(&model, &fonts, &mut c);
 

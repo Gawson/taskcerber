@@ -91,7 +91,7 @@ fn main() {
 
     let state = RtcState::load();
     info!(
-        "=== t5s3pro {VERSION} === boot #{}, powód: {:?}",
+        "=== taskcerber {VERSION} === boot #{}, powód: {:?}",
         state.boot_count,
         ResetReason::get()
     );
@@ -829,7 +829,7 @@ fn build_model(
     known_holidays: Option<(NaiveDate, NaiveDate)>,
 ) -> Model {
     let mut model = Model::empty(now);
-    model.firmware = format!("t5s3pro {VERSION}");
+    model.firmware = format!("taskcerber {VERSION}");
     model.battery = Battery {
         percent: fuel.percent,
         millivolts: fuel.millivolts,
@@ -970,7 +970,7 @@ fn present(
 /// po wgraniu firmware'u z przeglądarki.
 fn provisioning_model(now: NaiveDateTime, fuel: board::bq27220::Fuel, charging: bool) -> Model {
     let mut model = Model::empty(now);
-    model.firmware = format!("t5s3pro {VERSION}");
+    model.firmware = format!("taskcerber {VERSION}");
     // Stan ogniwa MUSI tu być, choć ekran jest „pusty". Wcześniej go nie było i przez
     // to wskaźnik baterii nie wskazywał niczego przez cały bring-up: `Model::empty`
     // daje `percent: None`, więc rysowała się sama ramka. Dane z licznika są w tym

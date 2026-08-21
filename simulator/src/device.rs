@@ -688,7 +688,7 @@ mod tests {
     fn model_z_wersja() -> Model {
         let mut m = Model::empty(now());
         // Bez wersji w stopce nie ma obszaru otwierającego konfigurację.
-        m.firmware = "t5s3pro 0.1.0".to_string();
+        m.firmware = "taskcerber 0.1.0".to_string();
         m
     }
 }

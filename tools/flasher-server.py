@@ -30,7 +30,7 @@ import threading
 class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
     """Zwykłe serwowanie plików, ale bez cache'owania i bez reklamowania Pythona."""
 
-    server_version = "t5s3pro-flasher"
+    server_version = "taskcerber-flasher"
     sys_version = ""
 
     def end_headers(self) -> None:
@@ -44,7 +44,7 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
 class RedirectHandler(http.server.BaseHTTPRequestHandler):
     """Odbija http://host:N/cokolwiek na https://host:PORT/cokolwiek."""
 
-    server_version = "t5s3pro-flasher"
+    server_version = "taskcerber-flasher"
     sys_version = ""
     https_port = 8443
 

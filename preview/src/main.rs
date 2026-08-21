@@ -131,7 +131,7 @@ fn main() {
                     hint: "sprawdź adres iCal; przy mało wolnej pamięci to może być TLS",
                     ms: 4700,
                     dram_kb: 62,
-                    firmware: "t5s3pro 0.1.0+gd8acb08",
+                    firmware: "taskcerber 0.1.0+gd8acb08",
                 },
                 &fonts,
                 &mut canvas,
@@ -220,7 +220,7 @@ fn base(now: NaiveDateTime) -> Model {
         millivolts: Some(3920),
         charging: false,
     };
-    m.firmware = "t5s3pro 0.1.0".to_string();
+    m.firmware = "taskcerber 0.1.0".to_string();
     m
 }
 
@@ -288,7 +288,7 @@ fn scenario_provisioning() -> Model {
             .and_hms_opt(0, 0, 0)
             .unwrap(),
     );
-    m.firmware = "t5s3pro 0.1.0".to_string();
+    m.firmware = "taskcerber 0.1.0".to_string();
     m.net = NetState::NeedsAuth;
     m.tiles = vec![
         Tile::new("krok 1", "Skonfiguruj"),

@@ -275,7 +275,7 @@ kosztuje dni.
 idf.py create-project epdspike && cd epdspike
 idf.py set-target esp32s3
 idf.py add-dependency "vroland/epdiy^2.1.3"
-cp ../t5s3pro/firmware/sdkconfig.defaults .
+cp ../taskcerber/firmware/sdkconfig.defaults .
 idf.py build flash monitor
 ```
 

@@ -66,7 +66,7 @@ if (( need_cert )); then
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
     -sha256 -days 397 -nodes \
     -keyout "$KEY" -out "$CRT" \
-    -subj "/CN=t5s3pro flasher ($HOST)" \
+    -subj "/CN=taskcerber flasher ($HOST)" \
     -addext "subjectAltName=$SAN" \
     -addext "basicConstraints=critical,CA:FALSE" \
     -addext "keyUsage=critical,digitalSignature,keyEncipherment" \

@@ -182,7 +182,7 @@ mod tests {
             hint,
             ms: 4700,
             dram_kb: 62,
-            firmware: "t5s3pro 0.1.0",
+            firmware: "taskcerber 0.1.0",
         }
     }
 

@@ -17,7 +17,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-BIN_NAME=t5s3pro
+BIN_NAME=taskcerber
 TARGET=xtensa-esp32s3-espidf
 OUT=dist
 

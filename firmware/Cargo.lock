@@ -1398,7 +1398,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "t5s3pro"
+name = "taskcerber"
 version = "0.1.0"
 dependencies = [
  "anyhow",

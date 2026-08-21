@@ -67,7 +67,7 @@ trap 'rm -f "$STR"' EXIT
 strings "$IMG" > "$STR"
 
 echo "== deskryptor aplikacji =="
-grep -qx "t5s3pro" "$STR" || fail "brak nazwy projektu w deskryptorze aplikacji"
+grep -qx "taskcerber" "$STR" || fail "brak nazwy projektu w deskryptorze aplikacji"
 ok "deskryptor obecny"
 
 echo "== sekrety =="
@@ -129,7 +129,7 @@ if [[ -f "$OTA_IMG" ]]; then
     OTA_STR=$(mktemp)
     trap 'rm -f "$STR" "$OTA_STR"' EXIT
     strings "$OTA_IMG" > "$OTA_STR"
-    grep -qx "t5s3pro" "$OTA_STR" || fail "brak deskryptora aplikacji w obrazie OTA"
+    grep -qx "taskcerber" "$OTA_STR" || fail "brak deskryptora aplikacji w obrazie OTA"
     grep -qE 'calendar\.google\.com/calendar/ical/.*/private-' "$OTA_STR" \
         && fail "obraz OTA zawiera prywatny adres iCal"
     ok "deskryptor obecny, brak sekretów"
