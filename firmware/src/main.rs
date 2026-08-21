@@ -183,6 +183,12 @@ fn run(mut state: RtcState) -> Result<u64> {
         fuel.percent, power_status.usb_present
     );
 
+    // Decyzja o oknie dotyku zapada TUTAJ, przed siecią, bo od niej zależy, czy warto
+    // w ogóle budzić kontroler dotyku. Zależy wyłącznie od rzeczy, które są już znane:
+    // konfiguracji, zasilania, licznika bootów i tego, co nas wybudziło.
+    let woke_by_button = wakeup.by_human();
+    let boot_count = state.boot_count;
+
     // Okruszek z poprzedniego cyklu. Jeśli tamten zamilkł w środku, TEN cykl
     // pomija sieć i oddaje panel diagnozie — bo panelu i radia nie wolno trzymać
     // naraz, a pisanie kroków na ekran w trakcie TLS-a powodowało dokładnie tę
@@ -198,6 +204,39 @@ fn run(mut state: RtcState) -> Result<u64> {
         // cykl ma spróbować sieci, a nie utknąć na tej samej diagnozie w kółko.
         store.mark_boot_step(BootStep::Reported, ms_od_startu(), wolny_dram_kb() as u16);
     }
+
+    // Na diagnozie okno dotyku otwieramy bezwarunkowo — bez niego przycisk
+    // „Konfiguracja" byłby rysunkiem, a to on jest zwykle lekarstwem: najczęstsza
+    // awaria to `łączenie z WiFi`, czyli najczęściej literówka w haśle.
+    let interact = diagnoza
+        || wants_interaction(
+            config.is_provisioned(),
+            power_status.usb_present,
+            boot_count,
+            woke_by_button,
+        );
+
+    // Czytnik dotyku wstaje PRZED siecią, nie po niej.
+    //
+    // Otwierany dopiero w oknie interaktywnym oznaczał, że przez cały czas pobierania
+    // — przy kanale 1,18 MB kilkanaście sekund — nikt nie rozmawiał z GT911.
+    // Stuknięcia z tego okresu nie ginęły w oprogramowaniu, tylko w kontrolerze:
+    // trzyma on jeden punkt i flagę w rejestrze 0x814E, której nikt nie kasował.
+    // A `Gt911::new` zaczyna od twardego resetu, więc samo otwarcie kontrolera
+    // kasowało to dotknięcie, które przed chwilą wybudziło urządzenie.
+    //
+    // Koszt jest znany i zmierzony: wątek to ~4 KB stosu w WEWNĘTRZNYM DRAM-ie plus
+    // transakcja I²C co `SAMPLE_MS`. Konkuruje więc z mbedTLS o tę samą pamięć —
+    // ale log ze sprzętu pokazuje 190 KB wolnego w chwili pobierania, a sterownik
+    // `i2c_master` serializuje dostęp semaforem, więc współdzielenie magistrali
+    // z TPS65185 i ekspanderem jest bezpieczne. Gdyby to jednak destabilizowało
+    // krok sieciowy, dowód będzie w logu: `krok5: pobieram ... DRAM {} KB`.
+    let reader = if interact {
+        board::gt911::open(&bus, boot_count <= 1)
+            .and_then(|touch| TouchReader::spawn(touch).map_err(|e| warn!("{e:#}")).ok())
+    } else {
+        None
+    };
 
     // --- 5. Sieć ---------------------------------------------------------------
     //
@@ -392,25 +431,12 @@ fn run(mut state: RtcState) -> Result<u64> {
     let content_changed = content_crc != painted_crc || !fetched;
     // Wybudzenie przyciskiem zawsze rysuje. Ktoś nacisnął, więc czegoś od urządzenia
     // chce — a za chwilę może chcieć obrócić ekran, co bez świeżej klatki nie ma sensu.
-    let woke_by_button = wakeup.by_human();
     // Cykl diagnostyczny maluje ZAWSZE: jego jedynym produktem jest ten ekran.
     let needs_paint = diagnoza
         || content_changed
         || state.boot_count <= 1
         || net_state != NetState::Ok
         || woke_by_button;
-
-    let boot_count = state.boot_count;
-    // Na diagnozie okno dotyku otwieramy bezwarunkowo — bez niego przycisk
-    // „Konfiguracja" byłby rysunkiem, a to on jest zwykle lekarstwem: najczęstsza
-    // awaria to `łączenie z WiFi`, czyli najczęściej literówka w haśle.
-    let interact = diagnoza
-        || wants_interaction(
-            config.is_provisioned(),
-            power_status.usb_present,
-            boot_count,
-            woke_by_button,
-        );
 
     // Dotyk NIE zależy od tego, czy akurat malujemy klatkę — zależność idzie
     // w drugą stronę: to dotknięcie powoduje przerysowanie. Mapa obszarów dotykowych
@@ -508,7 +534,6 @@ fn run(mut state: RtcState) -> Result<u64> {
         if interact {
             let changed = interactive_loop(
                 &mut epd,
-                &bus,
                 &hw,
                 &mut store,
                 &mut state,
@@ -523,7 +548,7 @@ fn run(mut state: RtcState) -> Result<u64> {
                 } else {
                     FRESH_IDLE_MS
                 },
-                boot_count <= 1,
+                reader,
             );
             if changed {
                 // Świeżo wpisana konfiguracja ma zadziałać teraz, a nie za pół godziny.
@@ -1310,7 +1335,6 @@ impl FingerEdge {
 #[allow(clippy::too_many_arguments)]
 fn interactive_loop(
     epd: &mut Epd,
-    bus: &I2cBus,
     hw: &Board,
     store: &mut Store,
     state: &mut RtcState,
@@ -1321,14 +1345,19 @@ fn interactive_loop(
     temperature_c: i32,
     mut rotation: Rotation,
     window_ms: u64,
-    verbose: bool,
+    // Czytnik przychodzi Z ZEWNĄTRZ, otwarty przed krokiem sieciowym.
+    //
+    // Otwierany tutaj oznaczał, że przez cały czas pobierania — a przy kanale 1,18 MB
+    // to kilkanaście sekund — nikt nie rozmawiał z GT911. Stuknięcia z tego okresu
+    // nie ginęły w oprogramowaniu, tylko w kontrolerze: trzyma on jeden punkt
+    // i flagę w rejestrze 0x814E, której nikt nie kasował.
+    //
+    // Gorzej: `Gt911::new` zaczyna od twardego resetu, więc otwarcie kontrolera
+    // KASOWAŁO dotknięcie, które przed chwilą wybudziło urządzenie. Stąd skarga
+    // „ma w dupie dotyk, w szczególności ten co go wybudził".
+    reader: Option<TouchReader>,
 ) -> bool {
     use std::time::{Duration, Instant};
-
-    // Kontroler idzie na własność wątkowi czytającemu — od tej chwili rysowanie
-    // i odbiór dotyku są od siebie niezależne. Patrz `TouchReader`.
-    let reader = board::gt911::open(bus, verbose)
-        .and_then(|touch| TouchReader::spawn(touch).map_err(|e| warn!("{e:#}")).ok());
     let mut custom = Button::new(hw.expander.button_pressed().unwrap_or(false));
     let mut model = model.clone();
 
