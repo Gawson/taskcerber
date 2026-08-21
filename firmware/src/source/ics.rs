@@ -21,6 +21,7 @@ use anyhow::{bail, Context, Result};
 use chrono::NaiveDateTime;
 use chrono_tz::Tz;
 use dashboard::model::SourceTag;
+use devlogic::redact;
 use icalfeed::{parse_feed, FeedError, Window};
 use log::{info, warn};
 
@@ -95,6 +96,24 @@ impl EventSource for IcsSource {
         ) {
             Ok(e) => e,
             Err(FeedError::Truncated) => {
+                // Brak END:VCALENDAR znaczy jedno z dwóch i warto je rozróżnić, bo
+                // prowadzą do zupełnie różnych działań. Zero przeczytanych bajtów
+                // z BEGIN:VCALENDAR to nie urwane pobranie, tylko ODPOWIEDŹ, KTÓRA
+                // NIE JEST KALENDARZEM — typowo strona logowania Google, bo ktoś
+                // wkleił link do kalendarza z paska przeglądarki zamiast adresu ICS.
+                if !hasher.saw_vcalendar() {
+                    // Podpowiedź celowo OPISUJE adres, zamiast pokazywać jego wzór.
+                    // Dosłowny szablon z „/calendar/ical/.../private-" wpada w skaner
+                    // sekretów z tools/check-image.sh, który nie odróżnia przykładu
+                    // od prawdziwego klucza — i słusznie, bo nie ma jak.
+                    bail!(
+                        "to nie jest kanał iCal — serwer odpowiedział czymś innym, \
+                         najczęściej stroną logowania. Weź adres z: Google Kalendarz -> \
+                         Ustawienia kalendarza -> Integracja kalendarza -> \
+                         „Prywatny adres w formacie iCal”. Musi kończyć się na basic.ics; \
+                         link skopiowany z paska przeglądarki NIE jest kanałem iCal."
+                    )
+                }
                 bail!("pobieranie urwane — brak END:VCALENDAR, dane byłyby niekompletne")
             }
             Err(FeedError::Io(e)) => bail!("błąd odczytu kanału: {e}"),
@@ -128,14 +147,6 @@ impl EventSource for IcsSource {
     }
 }
 
-/// Ukrywa tajny fragment adresu w logach.
-fn redact(url: &str) -> String {
-    match url.find("/private-") {
-        Some(i) => format!("{}/private-***", &url[..i]),
-        None => url.to_string(),
-    }
-}
-
 /// Czytnik przepuszczający dane i liczący po drodze CRC.
 struct Tee<'a, R> {
     inner: &'a mut R,
@@ -154,6 +165,11 @@ impl<R: std::io::Read> std::io::Read for Tee<'_, R> {
 struct StreamingCrc {
     state: u32,
     len: usize,
+    /// Ile bajtów `BEGIN:VCALENDAR` dopasowano do tej pory.
+    ///
+    /// Licznik, a nie flaga na buforze, bo strumień przychodzi kawałkami po 4 KB
+    /// i nagłówek może wypaść na granicy dwóch odczytów.
+    naglowek: usize,
 }
 
 impl StreamingCrc {
@@ -161,12 +177,36 @@ impl StreamingCrc {
         Self {
             state: 0xFFFF_FFFF,
             len: 0,
+            naglowek: 0,
         }
     }
+
+    /// Czy w strumieniu pojawiło się `BEGIN:VCALENDAR`.
+    ///
+    /// Odróżnia „pobranie się urwało" od „to w ogóle nie był kalendarz". Bez tego
+    /// obie sytuacje dają ten sam komunikat o braku `END:VCALENDAR`, a prowadzą do
+    /// zupełnie różnych działań: pierwsza do ponowienia, druga do poprawienia adresu.
+    fn saw_vcalendar(&self) -> bool {
+        self.naglowek >= Self::IGLA.len()
+    }
+
+    const IGLA: &'static [u8] = b"BEGIN:VCALENDAR";
 
     fn update(&mut self, data: &[u8]) {
         self.len += data.len();
         for &byte in data {
+            if self.naglowek < Self::IGLA.len() {
+                // Bez cofania: kanał iCal zaczyna się tym nagłówkiem, więc fałszywy
+                // start w rodzaju „BEGIN:BEGIN:VCALENDAR" nas nie interesuje —
+                // pytanie brzmi „czy to w ogóle kalendarz", nie „gdzie dokładnie".
+                self.naglowek = if byte == Self::IGLA[self.naglowek] {
+                    self.naglowek + 1
+                } else if byte == Self::IGLA[0] {
+                    1
+                } else {
+                    0
+                };
+            }
             self.state ^= byte as u32;
             for _ in 0..8 {
                 let mask = (self.state & 1).wrapping_neg();
