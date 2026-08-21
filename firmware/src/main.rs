@@ -810,9 +810,10 @@ fn fetch_everything(
             BootStep::FetchSecondary
         });
         krok!(&format!(
-            "pobieram {} · DRAM {} KB",
+            "pobieram {} · DRAM {} KB · stos {} B",
             src.name(),
-            wolny_dram_kb()
+            wolny_dram_kb(),
+            zapas_stosu_b()
         ));
         // Okno liczone POD ŹRÓDŁO — to jest cały sens `horizon_days`.
         let to = from + ChronoDuration::days(src.horizon_days());
@@ -843,7 +844,11 @@ fn fetch_everything(
     //
     // Po kalendarzu, bo kalendarz jest funkcją urządzenia, a aktualizacja tylko
     // utrzymaniem: nieudane albo długie OTA nie ma prawa zabrać ekranowi treści.
-    krok!(&format!("pobrane · DRAM {} KB", wolny_dram_kb()));
+    krok!(&format!(
+        "pobrane · DRAM {} KB · stos {} B",
+        wolny_dram_kb(),
+        zapas_stosu_b()
+    ));
     okruszek!(BootStep::Ota);
     let mut ota_installed = false;
     if ota_allowed {
@@ -2247,6 +2252,17 @@ impl Button {
 /// zapisu zegar kalendarzowy może być jeszcze nieustawiony (SNTP dopiero przed nami).
 fn ms_od_startu() -> u32 {
     (unsafe { esp_idf_svc::sys::esp_timer_get_time() } / 1000).clamp(0, u32::MAX as i64) as u32
+}
+
+/// Ile bajtów stosu zadania `main` NIGDY nie zostało użyte.
+///
+/// `uxTaskGetStackHighWaterMark(NULL)` podaje minimum wolnego miejsca od startu
+/// zadania. Przy przepełnieniu backtrace jest bezużyteczny — same adresy z obsługi
+/// paniki i `|<-CORRUPTED` — więc jedyny sposób, żeby dowiedzieć się, KTÓRY krok
+/// zjada stos, to zmierzyć zapas przed nim i po nim.
+fn zapas_stosu_b() -> u32 {
+    // SAFETY: `NULL` znaczy „bieżące zadanie"; wywołanie jest tylko odczytem.
+    unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()) }
 }
 
 fn wolny_dram_kb() -> u32 {

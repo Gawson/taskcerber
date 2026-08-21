@@ -99,11 +99,22 @@ pub fn release_pin_holds() {
     // dopiero po cyklu, w którym otworzyło się okno dotyku — bo dopiero ono woła
     // sekwencję resetu GT911 i przy okazji odkręca GPIO3. Z zewnątrz wyglądało to
     // jak „trzeba raz albo dwa razy wdusić BOOT, żeby zaczął reagować".
+    //
+    // NIE `gpio_reset_pin`, mimo że `gt911::reset_sequence` używa właśnie jej.
+    // Tam pin zaraz potem staje się wyjściem i podciągnięcie nie ma znaczenia; tutaj
+    // zostaje wejściem — a `gpio_reset_pin` WŁĄCZA podciągnięcie. GT911 próbkuje
+    // `T_INT` przy wychodzeniu z resetu, żeby wybrać adres I²C, więc podciągnięty pin
+    // sadzał kontroler pod 0x14 zamiast 0x5D. Diagnostyka złapała to sama:
+    // „GT911 pod ADRESEM ZAPASOWYM — sekwencja resetu ustawiła INT odwrotnie".
+    //
+    // `rtc_gpio_deinit` przywraca ścieżkę cyfrową i NIE dotyka podciągnięć, czyli
+    // robi dokładnie to, o co chodzi, i nic ponadto.
     for pin in [BOOT_BTN, TOUCH_INT] {
         // SAFETY: numery pinów stałe, oba w domenie RTC, wywołania bezstanowe.
         unsafe {
             sys::gpio_hold_dis(pin);
-            sys::gpio_reset_pin(pin);
+            sys::rtc_gpio_hold_dis(pin);
+            sys::rtc_gpio_deinit(pin);
         }
     }
 
