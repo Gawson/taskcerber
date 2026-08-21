@@ -145,7 +145,7 @@ pub struct DayGroup {
 }
 
 /// Pojedyncze wydarzenie z kalendarza.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalEvent {
     pub start: NaiveDateTime,
     pub end: NaiveDateTime,

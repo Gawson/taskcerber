@@ -10,6 +10,7 @@
 //! WiFi, ani adresu kalendarza.
 
 use anyhow::{Context, Result};
+use dashboard::snapshot::Snapshot;
 use dashboard::Rotation;
 use devlogic::boot::{BootStep, Crumb};
 use devlogic::ota::Attempts;
@@ -37,12 +38,21 @@ const KEY_OTA_URL: &str = "ota_url";
 // NVS liczy zapisy, a nie bajty. Pełne wyjaśnienie: nagłówek `devlogic::boot`.
 const KEY_BOOT_CRUMB: &str = "boot_crumb";
 
+// Migawka kalendarza. Zapisujemy ją TYLKO wtedy, gdy zmieniło się CRC treści —
+// patrz `Store::save_snapshot`. Bez tego warunku byłby to zapis kilku kilobajtów
+// do flasha co pół godziny, czyli kilkadziesiąt tysięcy cykli rocznie za nic.
+const KEY_SNAPSHOT: &str = "cal_snap";
+
 const KEY_OTA_TRY_VER: &str = "ota_try_ver";
 const KEY_OTA_TRY_N: &str = "ota_try_n";
 
 /// Maksymalna długość wartości tekstowej. Adresy iCal Google mają ~120 znaków;
 /// zapas jest na wypadek innych źródeł.
 pub const MAX_VALUE: usize = 512;
+
+/// Górny limit rozmiaru migawki. Partycja `nvs` ma 128 KB na wszystko, a realny
+/// kalendarz na czternaście dni mieści się w kilku — szesnaście to zapas, nie plan.
+const MAX_SNAPSHOT: usize = 16 * 1024;
 
 pub struct Store {
     nvs: EspNvs<NvsDefault>,
@@ -166,6 +176,58 @@ impl Store {
     ///
     /// Brak wpisu czytamy jako `Done`: świeżo przeflashowane urządzenie nie ma
     /// awarii do pokazania, a ekran diagnozy o niczym byłby gorszy niż jego brak.
+    /// Odczytuje zapisaną migawkę kalendarza.
+    ///
+    /// Każde niepowodzenie — brak wpisu, inna wersja formatu, obcięty blob — daje
+    /// `None`. Migawka jest optymalizacją, więc jej brak nie ma prawa niczego zepsuć.
+    pub fn load_snapshot(&self) -> Option<Snapshot> {
+        let mut buf = vec![0u8; MAX_SNAPSHOT];
+        match self.nvs.get_blob(KEY_SNAPSHOT, &mut buf) {
+            Ok(Some(bajty)) => {
+                let n = bajty.len();
+                match dashboard::snapshot::decode(bajty) {
+                    Some(s) => {
+                        log::info!("migawka: {} B, {} wydarzeń", n, s.events.len());
+                        Some(s)
+                    }
+                    None => {
+                        log::warn!("migawka nieczytelna ({n} B) — pomijam");
+                        None
+                    }
+                }
+            }
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!("nie mogę odczytać migawki: {e}");
+                None
+            }
+        }
+    }
+
+    /// Zapisuje migawkę, ale tylko gdy treść naprawdę się zmieniła.
+    ///
+    /// `crc` to suma kontrolna pobranej treści; `poprzednie_crc` to ta sama wartość
+    /// z ostatniego udanego cyklu. Gdy są równe, kalendarz się nie zmienił i zapis
+    /// byłby czystym zużyciem flasha — kilka kilobajtów co pół godziny to
+    /// kilkadziesiąt tysięcy cykli rocznie w zamian za nic.
+    pub fn save_snapshot(&mut self, snap: &Snapshot, crc: u32, poprzednie_crc: u32) {
+        if crc == poprzednie_crc && crc != 0 {
+            log::debug!("migawka bez zmian (CRC {crc:08x}) — nie zapisuję");
+            return;
+        }
+        let bajty = dashboard::snapshot::encode(snap);
+        if bajty.len() > MAX_SNAPSHOT {
+            log::warn!("migawka {} B przekracza limit — nie zapisuję", bajty.len());
+            return;
+        }
+        match self.nvs.set_blob(KEY_SNAPSHOT, &bajty) {
+            Ok(()) => log::info!("migawka zapisana: {} B", bajty.len()),
+            // Bez propagacji: nieudany zapis podręcznej kopii nie ma prawa wywrócić
+            // cyklu, w którym pobranie się udało.
+            Err(e) => log::warn!("nie mogę zapisać migawki: {e}"),
+        }
+    }
+
     pub fn boot_crumb(&self) -> Crumb {
         match self.nvs.get_u64(KEY_BOOT_CRUMB).ok().flatten() {
             Some(v) => Crumb::unpack(v),

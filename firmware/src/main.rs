@@ -217,9 +217,24 @@ fn run(mut state: RtcState) -> Result<u64> {
     }
 
     let mut net_state = NetState::Ok;
-    let mut events = Vec::new();
-    let mut known: Option<(NaiveDate, NaiveDate)> = None;
-    let mut known_holidays: Option<(NaiveDate, NaiveDate)> = None;
+
+    // Migawka z poprzedniego cyklu. Wchodzi do modelu OD RAZU, jeszcze przed decyzją
+    // o sieci — dzięki temu ekran ma co pokazać nawet wtedy, gdy pobrania nie będzie
+    // wcale: bez kabla, przy pominięciu ze względu na świeżość albo przy awarii sieci.
+    // Wydarzenia żyły dotąd wyłącznie w RAM-ie, a deep sleep gasi RAM, więc każde
+    // wybudzenie musiało pobierać wszystko od nowa albo pokazać pustkę.
+    let migawka = store.load_snapshot();
+    let migawka_swieza = migawka
+        .as_ref()
+        .is_some_and(|m| dashboard::snapshot::wciaz_uzyteczna(m, now.date()));
+    if migawka.is_some() && !migawka_swieza {
+        warn!("migawka dotyczy dni, które już minęły — nie używam jej");
+    }
+
+    let (mut events, mut known, mut known_holidays) = match &migawka {
+        Some(m) if migawka_swieza => (m.events.clone(), m.known, m.known_holidays),
+        _ => (Vec::new(), None, None),
+    };
     // CRC treści, która JEST na szkle. Trzymamy je osobno, bo `record_success`
     // nadpisuje `state.last_content_crc` zaraz po udanym pobraniu — porównanie
     // z polem stanu byłoby wtedy porównaniem wartości z samą sobą.
@@ -314,6 +329,18 @@ fn run(mut state: RtcState) -> Result<u64> {
                 known = out.known;
                 known_holidays = out.known_holidays;
                 fetched = true;
+
+                // Zapis PRZED `record_success`, bo ta funkcja nadpisuje
+                // `last_content_crc` — a to z nim porównujemy, żeby nie zapisywać
+                // do flasha kalendarza, który się nie zmienił.
+                let snap = dashboard::Snapshot {
+                    events: events.clone(),
+                    holidays: swieta_z_wydarzen(&events),
+                    known,
+                    known_holidays,
+                };
+                store.save_snapshot(&snap, content_crc, state.last_content_crc);
+
                 state.record_success(net::time::now_unix(), content_crc);
             }
             Err(e) => {
@@ -828,6 +855,22 @@ fn fetch_everything(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Wyciąga z listy wydarzeń same daty świąteczne, posortowane i bez powtórzeń.
+///
+/// Wydzielone, bo liczy to zarówno model do narysowania, jak i migawka zapisywana
+/// do NVS — a rozjazd między nimi znaczyłby, że po wybudzeniu z migawki znikają
+/// święta, które przed uśpieniem były.
+fn swieta_z_wydarzen(events: &[dashboard::model::CalEvent]) -> Vec<NaiveDate> {
+    let mut out: Vec<NaiveDate> = events
+        .iter()
+        .filter(|e| e.source == SourceTag::Holiday)
+        .map(|e| e.start.date())
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn build_model(
     now: NaiveDateTime,
     events: Vec<dashboard::model::CalEvent>,
@@ -850,14 +893,7 @@ fn build_model(
     // z treścią dwóch tygodni — gdyby wszystko poszło do `days`, agenda w sierpniu
     // listowałaby 25 grudnia, a miesiąc rysowałby pasek w kratce oznaczonej rastrem
     // „nie pytałem o ten dzień".
-    let mut holidays: Vec<NaiveDate> = events
-        .iter()
-        .filter(|e| e.source == SourceTag::Holiday)
-        .map(|e| e.start.date())
-        .collect();
-    holidays.sort_unstable();
-    holidays.dedup();
-    model.holidays = holidays;
+    model.holidays = swieta_z_wydarzen(&events);
 
     // Do `days` tylko to, co mieści się w horyzoncie TREŚCI. Bliskie święta
     // przechodzą przez to sito i pojawiają się w agendzie jak każde inne
@@ -1030,7 +1066,23 @@ fn unix_to_local(unix: i64, tz: chrono_tz::Tz) -> Option<NaiveDateTime> {
 /// traktuje nieznany stan ogniwa jak za mało energii (`Policy::should_ota`), a stan
 /// ogniwa na tym egzemplarzu JEST nieznany — BQ27220 nie był nigdy uruchomiony
 /// i `battery_percent` bywa `None`, co polityka trybu przepuszcza jak pełną baterię.
-const RADIO_ONLY_ON_USB: bool = true;
+/// # Dlaczego już `false`
+///
+/// Oba powody, dla których ta stała stała na `true`, upadły na dowodach:
+///
+/// * **„Nie wiadomo, czy pada od zasilania, czy od kodu".** Wiadomo: od kodu.
+///   Awaria była powtarzalnym `LoadProhibited` w mbedTLS, wywołanym przez
+///   `CONFIG_MBEDTLS_DYNAMIC_BUFFER` na ścieżce TLS 1.3. Po wyłączeniu tej opcji
+///   pobranie przechodzi. Brownout nie miał z tym nic wspólnego.
+/// * **„Stan ogniwa jest nieznany, bo BQ27220 nigdy nie chodził".** Chodzi. Log ze
+///   sprzętu podaje procent, napięcie, prąd i temperaturę, a `Policy::mode` schodzi
+///   przy niskim stanie do `Frugal`/`Survival`/`Hold` — i `should_fetch(Hold)` jest
+///   fałszem, więc ochrona przed nadawaniem na wyczerpanym ogniwie już działa.
+///
+/// Zostaje ryzyko szczytu nadajnika (~340 mA) na zużytym ogniwie, ale to jest ryzyko
+/// normalnej pracy tego urządzenia, a nie niewiadoma bring-upu — i pilnuje go polityka
+/// trybu, a nie ta stała.
+const RADIO_ONLY_ON_USB: bool = false;
 
 /// Czy wypisywać postęp kroku sieciowego wprost na panel.
 ///
