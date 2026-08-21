@@ -1,354 +1,344 @@
-//! Widok roczny — planer: dwanaście wierszy miesięcy, trzydzieści jeden kolumn dni.
+//! Widok roczny — dwanaście miesięcy, dni i święta. Kalendarz ścienny.
 //!
-//! # Do czego ten widok służy, a do czego nie
+//! # Co ten ekran pokazuje, a czego świadomie NIE
 //!
-//! Nie do gęstości. Do **struktury**: w jaki dzień tygodnia wypada dana data, gdzie
-//! leżą weekendy i święta, ile tygodni dzieli dwie daty, kiedy wypada termin.
-//! Po godzinę idzie się do agendy, po listę dnia do miesiąca — tutaj chodzi
-//! o kalendarz jako siatkę, nie jako treść.
+//! Pokazuje **strukturę roku**: który dzień tygodnia to która data, gdzie wypadają
+//! weekendy i święta, ile tygodni dzieli dwie daty. Nie pokazuje **nic o zajętości**
+//! — żadnych kropek, słupków ani gęstości. Kalendarz na ścianie odpowiada na pytanie
+//! „kiedy wypada", a nie „co mam zaplanowane"; od tego drugiego są agenda i miesiąc.
 //!
-//! Pierwsza wersja tego modułu rysowała słupki gęstości i była odpowiedzią na
-//! niezadane pytanie. Zostawiam to zapisane, bo błąd był pouczający: „widok roczny"
-//! brzmi jak podsumowanie, a jest narzędziem nawigacyjnym.
+//! Ten moduł przeszedł przez dwie ślepe uliczki i obie warto mieć zapisane, bo obie
+//! wyglądały na rozsądne:
 //!
-//! # Dlaczego NIE dwanaście miniaturek kalendarza
+//! 1. **Słupki gęstości.** Rok jako mapa tego, gdzie jest tłoczno. Odpowiedź na
+//!    niezadane pytanie — i przy prawdziwym kalendarzu, gdzie prawie każdy dzień
+//!    roboczy coś ma, po prostu szum.
+//! 2. **Pasma miesięcy z rastrem weekendów.** Bliżej, ale wciąż nie kalendarz:
+//!    żeby odczytać datę, trzeba było liczyć kolumny od podziałki.
 //!
-//! Naturalny odruch to ułożyć dwanaście siatek 7 × 6 w tablicę 3 × 4. Na płótnie
-//! 540 × 960 daje to kratkę dnia **25 × 30 px**. Dwucyfrowa liczba w podłodze
-//! typograficznej ma ~20 px szerokości, więc formalnie się mieści — i to jest
-//! pułapka, bo mieści się **504 razy**. Ekran z pięciuset liczbami w rozmiarze
-//! granicznym nie jest widokiem rocznym, tylko ścianą cyfr.
+//! # Dlaczego „ściana cyfr" okazała się złym zarzutem
 //!
-//! Układ „miesiąc w wierszu, dzień w kolumnie" to klasyczny planer ścienny i ma
-//! własność, której siatka miesięcy nie ma: **weekendy układają się w ukośne pasy**.
-//! Każdy taki pas to jeden tydzień, więc liczenie tygodni między dwiema datami
-//! sprowadza się do policzenia pasów — bez numerów tygodni, bez arytmetyki.
+//! Odrzuciłem kiedyś ten układ szacunkiem, że dwucyfrowa liczba w podłodze
+//! typograficznej ma ~20 px, więc 504 z nich nie da się ułożyć czytelnie. **Pomiar
+//! mówi co innego**: najszersza para cyfr w 22 px ma 18,5 px, a w 19 px — 16,0.
 //!
-//! # Przeszłość NIE jest tu wyszarzana
+//! Przy podziale 3 × 4 w pionie blok miesiąca dostaje 173 × 199 px, czyli kratkę
+//! **24,7 × 24,5 px** — prawie kwadratową, z sześcioma pikselami luzu wokół liczby
+//! pisanej stopniem 22, a więc POWYŻEJ podłogi. Zarzut opierał się na zgadywanej
+//! szerokości, nie na zmierzonej.
 //!
-//! W widoku miesięcznym minione dni bledną, bo tam liczy się to, co przed nami.
-//! Tutaj jest odwrotnie: sprawdzenie, w jaki dzień wypadał zeszłoroczny termin,
-//! to jedno z zastosowań tego ekranu. Struktura roku jest pokazana w całości.
+//! # Weekend jest strukturą, nie oznaczeniem
 //!
-//! Horyzontem ograniczone są wyłącznie **dane o wydarzeniach** — urządzenie pobiera
-//! `HORIZON_DAYS` dni do przodu i tylko w tym oknie potrafi zaznaczyć zajęty dzień.
-//! Sama siatka dat, weekendy i święta z kalendarza świąt nie zależą od pobrania.
+//! W siatce zaczynającej się od poniedziałku sobota i niedziela to **zawsze dwie
+//! ostatnie kolumny**. Nie trzeba ich więc podkreślać tonem — wystarczy kreska
+//! oddzielająca piątek od soboty. To ważne, bo raster pod cyfrą jest na tym panelu
+//! kosztowny: cyfra bez białej podkładki siada na kropkach i przestaje być cyfrą,
+//! a przy kratce 24 px na podkładkę nie ma miejsca.
+//!
+//! # Święto to jedyne wypełnienie
+//!
+//! Pełna czarna kratka z liczbą w negatywie — jedyne miejsce w tym widoku rysowane
+//! zalewką, więc czyta się z drugiego końca pokoju. Negatyw idzie `Bold`, reguła 4
+//! z nagłówka [`crate::layout`].
+//!
+//! **Święta znamy tylko z pobranego okna.** Sama siatka dat liczy się z kalendarza
+//! i obowiązuje cały rok, ale święto jest wydarzeniem — przychodzi z kanału ICS
+//! i sięga tak daleko, jak `HORIZON_DAYS`. Przy dzisiejszych czternastu dniach ten
+//! ekran pokaże strukturę całego roku i święta z dwóch tygodni. Stopka mówi to
+//! wprost, zamiast udawać, że listopad jest bez świąt.
 
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{Datelike, NaiveDate};
 
-use crate::canvas::{dither_rect, Gray8, Rect, BLACK, INK_FAINT, WHITE};
+use crate::canvas::{Gray8, Rect, BLACK, INK_DIM, WHITE};
 use crate::hit::Screen;
 use crate::layout::{TEXT_BODY, TEXT_FLOOR, TEXT_HEAD};
 use crate::model::{Model, SourceTag};
-use crate::shapes::hline;
+use crate::shapes::{hline, stroke_round_rect};
 use crate::text::{Align, Fonts, Weight};
 
+const MONTHS: usize = 12;
+const COLS: i32 = 7;
+const WEEKS: i32 = 6;
+
+const SKROTY: [&str; MONTHS] = [
+    "styczeń",
+    "luty",
+    "marzec",
+    "kwiecień",
+    "maj",
+    "czerwiec",
+    "lipiec",
+    "sierpień",
+    "wrzesień",
+    "październik",
+    "listopad",
+    "grudzień",
+];
+
+/// Inicjały dni tygodnia, od poniedziałku.
+const DNI: [&str; 7] = ["p", "w", "ś", "c", "p", "s", "n"];
+
 /// Wysokość dostępna dla treści: płótno bez pasa zakładek.
-///
-/// Widok rysuje się nad paskiem, a nie pod nim — bez tego stopka wpadałaby pod
-/// zakładki i znikała.
 fn body_h(c: &Gray8) -> i32 {
     c.height() as i32 - crate::nav::tabs_h(c)
 }
 
-const MONTHS: i32 = 12;
-const MAX_DAYS: i32 = 31;
-
-const HEAD_H: i32 = 78;
-const FOOT_H: i32 = 52;
-/// Szerokość kolumny z nazwą miesiąca.
-const LABEL_W: i32 = 46;
-
-const SKROTY: [&str; 12] = [
-    "sty", "lut", "mar", "kwi", "maj", "cze", "lip", "sie", "wrz", "paź", "lis", "gru",
-];
-
-/// Geometria planera.
-struct Grid {
+/// Rozkład dwunastu bloków i geometria jednego z nich.
+struct Plan {
+    kolumny: i32,
     margin: i32,
-    row_h: i32,
-    col_w: i32,
-    grid_x: i32,
+    blok_w: i32,
+    blok_h: i32,
+    top: i32,
+    cell_w: i32,
     cell_h: i32,
+    /// Wysokość nazwy miesiąca plus wiersza inicjałów, licząc od góry bloku.
+    naglowek_h: i32,
+    stopien: f32,
 }
 
-impl Grid {
-    fn of(c: &Gray8) -> Self {
-        let (w, h) = (c.width() as i32, body_h(c));
-        let margin = 12;
-        let grid_x = margin + LABEL_W;
-        let row_h = (h - HEAD_H - FOOT_H) / MONTHS;
+impl Plan {
+    fn of(c: &Gray8, fonts: &Fonts) -> Self {
+        let w = c.width() as i32;
+        let h = body_h(c);
+        let pion = c.rotation().is_portrait();
+
+        // 3 x 4 w pionie, 6 x 2 w poziomie. Wybór jest wymuszony przez wysokość
+        // kratki, nie przez estetykę: w poziomie na treść zostaje 486 px, więc przy
+        // czterech kolumnach na blok przypada 136 px, a po odjęciu nagłówka wychodzi
+        // 15 px na wiersz tygodnia — mniej niż stopień pisma. Sześć kolumn daje 25 px.
+        let kolumny = if pion { 3 } else { 6 };
+        let wiersze = MONTHS as i32 / kolumny;
+
+        let margin = 10;
+        let head_h = if pion { 56 } else { 46 };
+        let foot_h = if pion { 40 } else { 32 };
+
+        let blok_w = (w - 2 * margin) / kolumny;
+        // Rynna między miesiącami. Bez niej niedziela stycznia sąsiaduje wprost
+        // z poniedziałkiem lutego i dwanaście bloków czyta się jak jeden pas —
+        // widać to było zwłaszcza w poziomie, gdzie na blok przypada 156 px.
+        let rynna = if pion { 8 } else { 10 };
+        let blok_h = (h - head_h - foot_h) / wiersze;
+        let naglowek_h = if pion { 48 } else { 42 };
+        let cell_w = (blok_w - rynna) / COLS;
+        let cell_h = (blok_h - naglowek_h) / WEEKS;
+
+        // Największy stopień, w którym najszersza para cyfr mieści się w kratce
+        // z oddechem. Mierzymy „28" — to ona, a nie „31", jest najszersza w tym
+        // kroju. Bez doboru układ poziomy by się rozjechał, a pionowy marnowałby
+        // sześć pikseli luzu na kratkę.
+        let luz = 4.0;
+        let stopien = [TEXT_BODY, 20.0, TEXT_FLOOR, 17.0]
+            .into_iter()
+            .find(|&sz| fonts.measure("28", sz, Weight::Bold) + luz <= cell_w as f32)
+            .unwrap_or(15.0);
+
         Self {
+            kolumny,
             margin,
-            row_h,
-            col_w: (w - margin - grid_x) / MAX_DAYS,
-            grid_x,
-            // Kratka niższa niż wiersz: prześwit między miesiącami sprawia, że
-            // ukośny pas weekendu czyta się jako ciąg kratek, a nie jako plama.
-            cell_h: row_h - 6,
+            blok_w,
+            blok_h,
+            top: head_h,
+            cell_w,
+            cell_h,
+            naglowek_h,
+            stopien,
         }
     }
 
-    fn row_y(&self, month: i32) -> i32 {
-        HEAD_H + month * self.row_h
-    }
-
-    fn col_x(&self, day: i32) -> i32 {
-        self.grid_x + day * self.col_w
-    }
-
-    fn cell(&self, month: i32, day: i32) -> Rect {
+    fn blok(&self, m: usize) -> Rect {
+        let i = m as i32;
         Rect::new(
-            self.col_x(day) + 1,
-            self.row_y(month) + 2,
-            self.col_w - 2,
-            self.cell_h,
+            self.margin + (i % self.kolumny) * self.blok_w,
+            self.top + (i / self.kolumny) * self.blok_h,
+            self.blok_w,
+            self.blok_h,
         )
     }
 }
 
-/// Co urządzenie wie o jednym dniu.
-#[derive(Clone, Copy, Default)]
-struct DayInfo {
-    /// Dzień leży w pobranym oknie — bez tego nie wiadomo, czy brak święta
-    /// oznacza dzień roboczy, czy tylko brak danych.
-    znany: bool,
-    swieto: bool,
-}
-
-/// Zbiera informacje o dniach roku, indeksowane `[miesiąc-1][dzień-1]`.
-fn scan(model: &Model, year: i32) -> [[DayInfo; 31]; 12] {
-    let mut out = [[DayInfo::default(); 31]; 12];
-    let zakres = crate::month::covered_range(model);
-
-    if let Some((a, z)) = zakres {
-        let mut d = a;
-        while d <= z {
-            if d.year() == year {
-                out[(d.month() - 1) as usize][(d.day() - 1) as usize].znany = true;
-            }
-            match d.succ_opt() {
-                Some(n) => d = n,
-                None => break,
-            }
-        }
-    }
-
+/// Dni roku będące świętami, indeksowane `[miesiąc-1][dzień-1]`.
+///
+/// Tylko `SourceTag::Holiday`. Spotkanie w kalendarzu głównym nie ma tu czego szukać
+/// — ten ekran z założenia nic nie mówi o zajętości.
+fn swieta(model: &Model, year: i32) -> [[bool; 31]; MONTHS] {
+    let mut out = [[false; 31]; MONTHS];
     for day in &model.days {
         if day.date.year() != year {
             continue;
         }
-        let slot = &mut out[(day.date.month() - 1) as usize][(day.date.day() - 1) as usize];
-        slot.znany = true;
-        // Interesują nas TYLKO święta. Spotkania nie: pierwsza wersja stawiała
-        // kropkę przy każdym zajętym dniu i w kalendarzu, w którym prawie każdy
-        // dzień roboczy coś ma, kropki układały się w ciągłą linię pod miesiącem.
-        // Czytało się to jak linijka, a nie jak dane — i zagłuszało pasy weekendów,
-        // czyli jedyną rzecz, dla której ten ekran istnieje.
-        slot.swieto |= day.events.iter().any(|e| e.source == SourceTag::Holiday);
+        if day.events.iter().any(|e| e.source == SourceTag::Holiday) {
+            out[(day.date.month() - 1) as usize][(day.date.day() - 1) as usize] = true;
+        }
     }
     out
 }
 
-/// Rysuje planer roczny dla roku, w którym leży `model.now`.
+/// Rysuje kalendarz roczny dla roku, w którym leży `model.now`.
 pub fn render_year(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     c.clear(WHITE);
     let screen = Screen::default();
-    let g = Grid::of(c);
+    let p = Plan::of(c, fonts);
     let w = c.width() as i32;
     let today = model.now.date();
     let year = today.year();
-    let info = scan(model, year);
+    let sw = swieta(model, year);
 
     // --- nagłówek ----------------------------------------------------------
     fonts.draw(
         c,
         &year.to_string(),
-        g.margin as f32,
-        44.0,
+        p.margin as f32,
+        (p.top - 18) as f32,
         TEXT_HEAD,
         Weight::Bold,
         BLACK,
         Align::Left,
     );
+    hline(c, p.margin, p.top - 10, w - 2 * p.margin, 2, BLACK);
 
-    // Podziałka dni: co piąty. Trzydzieści jeden liczb w kolumnie 15 px byłoby
-    // ścianą cyfr, którą ten układ miał właśnie zastąpić.
-    for d in [0, 4, 9, 14, 19, 24, 29] {
-        fonts.draw(
-            c,
-            &(d + 1).to_string(),
-            (g.col_x(d) + g.col_w / 2) as f32,
-            (HEAD_H - 10) as f32,
-            TEXT_FLOOR,
-            Weight::Medium,
-            INK_FAINT,
-            Align::Center,
-        );
-    }
-    hline(c, g.margin, HEAD_H - 3, w - 2 * g.margin, 2, BLACK);
-
-    // --- siatka ------------------------------------------------------------
-    for m in 0..MONTHS {
-        let miesiac = (m + 1) as u32;
-        let dni = dni_miesiaca(year, miesiac);
-        let biezacy = miesiac == today.month();
-        let y = g.row_y(m);
-
-        fonts.draw(
-            c,
-            SKROTY[m as usize],
-            g.margin as f32,
-            // Podstawa pisma w połowie kratki plus pół wysokości wersalika:
-            // etykieta ma stać na wysokości swojego wiersza w obu orientacjach,
-            // a te różnią się wysokością wiersza dwukrotnie (62 px wobec 27 px).
-            (y + g.cell_h / 2 + 8) as f32,
-            TEXT_BODY,
-            if biezacy {
-                Weight::Bold
-            } else {
-                Weight::Medium
-            },
-            if biezacy { BLACK } else { INK_FAINT },
-            Align::Left,
-        );
-
-        // Podstawa wiersza: bez niej oko gubi się w poziomie przy trzydziestu jeden
-        // kolumnach i „sie" przestaje się wiązać z kolumną 18.
-        hline(c, g.grid_x, y + g.row_h - 3, g.col_w * dni, 1, INK_FAINT);
-
-        for d in 0..dni {
-            let Some(data) = NaiveDate::from_ymd_opt(year, miesiac, (d + 1) as u32) else {
-                continue;
-            };
-            let cell = g.cell(m, d);
-
-            // Kreska na początku poniedziałku. Dzięki niej odpowiedź na „w jaki
-            // dzień wypada 15 marca" to policzenie kratek od najbliższej kreski,
-            // zamiast liczenia w tył od pasa weekendu. Przy okazji tydzień staje
-            // się jednostką widoczną wprost, a nie wyprowadzoną z ukosu.
-            if data.weekday() == Weekday::Mon {
-                // Pełny atrament i trzy piksele. Poniedziałek nigdy nie jest
-                // weekendem, więc kreska stoi zawsze na białym tle — a przy 234 DPI
-                // dwa piksele w słabszym tonie nikną między kratkami rastru.
-                // Rytm wiersza staje się przez to czytelny wprost:
-                // kreska, pięć dni roboczych, para weekendowa.
-                // Kreska sięga górnej części wiersza, nie całej wysokości: poniedziałek
-                // wypada tuż za parą weekendową, a pełnowysokościowa kreska sklejała
-                // się z nią w jedną plamę i tydzień znów trzeba było odgadywać.
-                c.fill_rect(Rect::new(cell.x - 1, y + 1, 3, g.row_h * 2 / 5), BLACK);
-            }
-
-            draw_day(c, cell, data, info[m as usize][d as usize], data == today);
-        }
+    // --- dwanaście bloków --------------------------------------------------
+    for (m, swieta_miesiaca) in sw.iter().enumerate() {
+        draw_month(c, fonts, &p, p.blok(m), year, m, swieta_miesiaca, today);
     }
 
     // --- stopka ------------------------------------------------------------
-    let foot = body_h(c) - FOOT_H;
-    hline(c, g.margin, foot, w - 2 * g.margin, 1, INK_FAINT);
-    legenda(c, fonts, &g, foot, model, year);
-
-    c.quantize_ink();
-    screen
-}
-
-/// Rysuje jedną kratkę dnia.
-///
-/// Kolejność jest hierarchią ważności, bo kratka ma ~15 × 60 px i nie zmieści
-/// czterech niezależnych oznaczeń naraz: weekend to tło, święto je nadpisuje,
-/// dzisiaj nadpisuje wszystko.
-fn draw_day(c: &mut Gray8, cell: Rect, data: NaiveDate, info: DayInfo, dzis: bool) {
-    // Dzień spoza pobranego okna: sama struktura (weekend, poniedziałek) jest
-    // liczona z kalendarza i obowiązuje zawsze, ale o świętach nic nie wiadomo.
-    // Rozróżnienie niesie stopka, nie kratka — dwanaście miesięcy w rastrze
-    // „nie wiem" zamieniłoby ekran w szum.
-    let _ = info.znany;
-
-    match data.weekday() {
-        // Niedziela ciemniejsza od soboty: dzięki temu ukośny pas ma kierunek
-        // i widać, gdzie tydzień się kończy, a nie tylko że gdzieś tam jest.
-        Weekday::Sun => dither_rect(c, cell, 8),
-        Weekday::Sat => dither_rect(c, cell, 4),
-        _ => {}
-    }
-
-    if info.swieto {
-        // Święto: pełna kratka atramentu. Jedyne pole w tym widoku rysowane
-        // na czarno bez rastra, więc czyta się z dystansu.
-        c.fill_rect(cell, BLACK);
-    }
-
-    if dzis {
-        // Dzisiaj: ramka, nie wypełnienie. Wypełnienie zjadłoby oznaczenie święta,
-        // a 1 stycznia bywa jednym i drugim.
-        obwodka(c, cell, 3);
-    }
-}
-
-/// Rysuje ramkę o zadanej grubości wewnątrz prostokąta.
-fn obwodka(c: &mut Gray8, r: Rect, t: i32) {
-    c.fill_rect(Rect::new(r.x, r.y, r.w, t), BLACK);
-    c.fill_rect(Rect::new(r.x, r.y + r.h - t, r.w, t), BLACK);
-    c.fill_rect(Rect::new(r.x, r.y, t, r.h), BLACK);
-    c.fill_rect(Rect::new(r.x + r.w - t, r.y, t, r.h), BLACK);
-}
-
-/// Legenda plus uczciwe zdanie o tym, dokąd sięgają dane.
-fn legenda(c: &mut Gray8, fonts: &Fonts, g: &Grid, foot: i32, model: &Model, year: i32) {
-    let w_pelne = c.width() as i32;
-    let y = foot + 30;
-    let mut x = g.margin;
-    let próbka = 16;
-
-    let wpis = |c: &mut Gray8, x: &mut i32, rysuj: &dyn Fn(&mut Gray8, Rect), tekst: &str| {
-        let r = Rect::new(*x, y - 14, próbka, 18);
-        rysuj(c, r);
-        fonts.draw(
-            c,
-            tekst,
-            (*x + próbka + 6) as f32,
-            y as f32,
-            TEXT_FLOOR,
-            Weight::Medium,
-            INK_FAINT,
-            Align::Left,
-        );
-        *x += próbka + 6 + fonts.measure(tekst, TEXT_FLOOR, Weight::Medium) as i32 + 14;
-    };
-
-    wpis(c, &mut x, &|c, r| dither_rect(c, r, 8), "weekend");
-    wpis(c, &mut x, &|c, r| c.fill_rect(r, BLACK), "święto");
-    wpis(c, &mut x, &|c, r| obwodka(c, r, 3), "dziś");
-    wpis(
-        c,
-        &mut x,
-        &|c, r| c.fill_rect(Rect::new(r.x, r.y, 3, r.h), BLACK),
-        "pon.",
-    );
-
-    // Zasięg danych: weekendy są liczone z kalendarza i obowiązują cały rok,
-    // ale święta i zajętość znamy tylko z pobranego okna. Bez tego zdania pusty
-    // listopad wyglądałby jak listopad bez świąt.
-    let zasieg = match crate::month::covered_range(model) {
-        Some((a, z)) if a.year() <= year && z.year() >= year => format!(
-            "święta znane {}.{:02}–{}.{:02}",
+    let foot = body_h(c) - 12;
+    let podpis = match crate::month::covered_range(model) {
+        Some((a, z)) => format!(
+            "święta znane {}.{:02}–{}.{:02} · siatka dat obowiązuje cały rok",
             a.day(),
             a.month(),
             z.day(),
             z.month()
         ),
-        _ => "brak pobranych danych o świętach".to_string(),
+        None => "brak pobranych świąt · siatka dat obowiązuje cały rok".to_string(),
     };
     fonts.draw(
         c,
-        &zasieg,
-        (w_pelne - g.margin) as f32,
-        y as f32,
+        &podpis,
+        p.margin as f32,
+        foot as f32,
         TEXT_FLOOR,
         Weight::Medium,
-        INK_FAINT,
-        Align::Right,
+        INK_DIM,
+        Align::Left,
     );
+
+    c.quantize_ink();
+    screen
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_month(
+    c: &mut Gray8,
+    fonts: &Fonts,
+    p: &Plan,
+    blok: Rect,
+    year: i32,
+    m: usize,
+    swieta: &[bool; 31],
+    today: NaiveDate,
+) {
+    let miesiac = (m + 1) as u32;
+    let biezacy = miesiac == today.month() && year == today.year();
+
+    // Nazwa miesiąca. „październik" jest najdłuższa i przy bloku 158 px w poziomie
+    // nie wchodzi w TEXT_BODY — schodzimy o stopień zamiast skracać, bo skrót
+    // trzyliterowy myli się z „paź" i „lis" przy szybkim spojrzeniu.
+    let nazwa = SKROTY[m];
+    let stopien_nazwy = if fonts.measure(nazwa, TEXT_BODY, Weight::Bold) <= (blok.w - 4) as f32 {
+        TEXT_BODY
+    } else {
+        TEXT_FLOOR
+    };
+    fonts.draw(
+        c,
+        nazwa,
+        (blok.x + 2) as f32,
+        (blok.y + 20) as f32,
+        stopien_nazwy,
+        Weight::Bold,
+        BLACK,
+        Align::Left,
+    );
+
+    // Inicjały dni tygodnia.
+    let inicjaly_y = blok.y + p.naglowek_h - 8;
+    for (i, d) in DNI.iter().enumerate() {
+        let i = i as i32;
+        let weekend = i >= 5;
+        fonts.draw(
+            c,
+            d,
+            (blok.x + i * p.cell_w + p.cell_w / 2) as f32,
+            inicjaly_y as f32,
+            TEXT_FLOOR,
+            if weekend {
+                Weight::Bold
+            } else {
+                Weight::Medium
+            },
+            if weekend { BLACK } else { INK_DIM },
+            Align::Center,
+        );
+    }
+
+    // Kreska między piątkiem a sobotą. Weekend jest w tym układzie strukturą —
+    // zawsze dwie ostatnie kolumny — więc wystarczy go oddzielić, zamiast kłaść
+    // raster pod cyframi, gdzie i tak nie ma miejsca na białą podkładkę.
+    let siatka_y = blok.y + p.naglowek_h;
+    c.fill_rect(
+        Rect::new(blok.x + 5 * p.cell_w, siatka_y, 1, WEEKS * p.cell_h),
+        INK_DIM,
+    );
+
+    let Some(pierwszy) = NaiveDate::from_ymd_opt(year, miesiac, 1) else {
+        return;
+    };
+    let offset = pierwszy.weekday().num_days_from_monday() as i32;
+    let dni = dni_miesiaca(year, miesiac);
+
+    for idx in 0..dni {
+        let kol = (idx + offset) % COLS;
+        let wiersz = (idx + offset) / COLS;
+        if wiersz >= WEEKS {
+            break;
+        }
+        let cell = Rect::new(
+            blok.x + kol * p.cell_w,
+            siatka_y + wiersz * p.cell_h,
+            p.cell_w,
+            p.cell_h,
+        );
+        let dzien = (idx + 1) as u32;
+        let swieto = swieta[idx as usize];
+        let dzis = biezacy && dzien == today.day();
+
+        if swieto {
+            // Jedyna zalewka w tym widoku — dlatego święto widać z dystansu.
+            c.fill_rect(cell.inset(1), BLACK);
+        }
+        if dzis {
+            stroke_round_rect(c, cell.inset(1), 4.0, 2, if swieto { WHITE } else { BLACK });
+        }
+
+        fonts.draw(
+            c,
+            &dzien.to_string(),
+            (cell.x + cell.w / 2) as f32,
+            (cell.y + cell.h - (cell.h - p.stopien as i32) / 2 - 2) as f32,
+            p.stopien,
+            if swieto || dzis {
+                Weight::Bold
+            } else {
+                Weight::Medium
+            },
+            if swieto { WHITE } else { BLACK },
+            Align::Center,
+        );
+    }
 }
 
 pub(crate) fn dni_miesiaca(year: i32, month: u32) -> i32 {
@@ -370,9 +360,9 @@ pub(crate) fn dni_miesiaca(year: i32, month: u32) -> i32 {
 mod tests {
     use super::*;
     use crate::canvas::Rotation;
-    use crate::model::DayGroup;
+    use crate::model::{CalEvent, DayGroup};
 
-    fn pusty(rok: i32, mies: u32, dzien: u32) -> Model {
+    fn model_na(rok: i32, mies: u32, dzien: u32) -> Model {
         Model::empty(
             NaiveDate::from_ymd_opt(rok, mies, dzien)
                 .unwrap()
@@ -381,121 +371,140 @@ mod tests {
         )
     }
 
+    fn wydarzenie(d: NaiveDate, tag: SourceTag) -> DayGroup {
+        DayGroup {
+            date: d,
+            events: vec![CalEvent {
+                start: d.and_hms_opt(0, 0, 0).unwrap(),
+                end: d.and_hms_opt(23, 59, 0).unwrap(),
+                all_day: true,
+                title: "x".into(),
+                location: None,
+                source: tag,
+            }],
+        }
+    }
+
+    /// Ile atramentu w kratce danego dnia — do odróżnienia zalewki od samej cyfry.
+    fn zalane_procent(c: &Gray8, p: &Plan, m: usize, dzien: u32, rok: i32) -> usize {
+        let blok = p.blok(m);
+        let pierwszy = NaiveDate::from_ymd_opt(rok, (m + 1) as u32, 1).unwrap();
+        let offset = pierwszy.weekday().num_days_from_monday() as i32;
+        let idx = dzien as i32 - 1;
+        let cell = Rect::new(
+            blok.x + ((idx + offset) % COLS) * p.cell_w,
+            blok.y + p.naglowek_h + ((idx + offset) / COLS) * p.cell_h,
+            p.cell_w,
+            p.cell_h,
+        );
+        let czarne = (cell.y..cell.bottom())
+            .flat_map(|y| (cell.x..cell.right()).map(move |x| (x, y)))
+            .filter(|&(x, y)| c.get(x, y) == BLACK)
+            .count();
+        czarne * 100 / (cell.w * cell.h).max(1) as usize
+    }
+
+    /// Sześć wierszy musi wystarczyć na każdy możliwy miesiąc. Najgorszy przypadek
+    /// to 31 dni zaczynające się w niedzielę: offset 6 + 31 = 37 kratek, czyli
+    /// szósty wiersz jest konieczny, a siódmy nigdy.
     #[test]
-    fn siatka_miesci_dwanascie_miesiecy_i_trzydziesci_jeden_dni() {
+    fn szesc_tygodni_zawsze_wystarcza() {
+        for rok in 2024..2036 {
+            for m in 1..=12u32 {
+                let pierwszy = NaiveDate::from_ymd_opt(rok, m, 1).unwrap();
+                let offset = pierwszy.weekday().num_days_from_monday() as i32;
+                let potrzeba = offset + dni_miesiaca(rok, m);
+                assert!(
+                    potrzeba <= WEEKS * COLS,
+                    "{rok}-{m}: {potrzeba} kratek nie mieści się w {}",
+                    WEEKS * COLS
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dwanascie_blokow_miesci_sie_nad_zakladkami() {
+        let fonts = Fonts::embedded();
         for rot in [Rotation::Portrait, Rotation::Landscape] {
             let c = Gray8::new(rot);
-            let g = Grid::of(&c);
-            let ost = g.cell(MONTHS - 1, MAX_DAYS - 1);
-            assert!(
-                ost.y + ost.h <= body_h(&c) - FOOT_H,
-                "{rot:?}: grudzień wchodzi w stopkę"
-            );
-            assert!(
-                ost.x + ost.w <= c.width() as i32 - g.margin,
-                "{rot:?}: 31 dzień wychodzi poza margines"
-            );
-            assert!(g.col_w >= 12, "{rot:?}: kolumna {} px za wąska", g.col_w);
+            let p = Plan::of(&c, &fonts);
+            for m in 0..MONTHS {
+                let b = p.blok(m);
+                let dol = b.y + p.naglowek_h + WEEKS * p.cell_h;
+                assert!(
+                    dol <= body_h(&c),
+                    "{rot:?}: miesiąc {m} kończy się na {dol}, a treść ma {} px",
+                    body_h(&c)
+                );
+                assert!(
+                    b.x + COLS * p.cell_w <= c.width() as i32,
+                    "{rot:?}: miesiąc {m} wychodzi poza prawą krawędź"
+                );
+            }
         }
     }
 
-    /// Weekendy muszą tworzyć ukośne pasy — na tym opiera się liczenie tygodni.
-    /// Test sprawdza własność układu, nie piksele: w kolejnych miesiącach kolumna
-    /// pierwszej soboty przesuwa się, a odstęp między sobotami to zawsze 7 dni.
+    /// Dobrany stopień musi realnie mieścić najszerszą parę cyfr — to jest ten
+    /// pomiar, którego brak kazał kiedyś odrzucić cały ten układ jako „ścianę cyfr".
     #[test]
-    fn soboty_ukladaja_sie_w_ukosne_pasy() {
-        let rok = 2026;
-        let mut poprzednia = None;
-        let mut przesuniecia = 0;
-        for m in 1..=12u32 {
-            let pierwsza = (1..=7)
-                .filter_map(|d| NaiveDate::from_ymd_opt(rok, m, d))
-                .find(|d| d.weekday() == Weekday::Sat)
-                .expect("każdy miesiąc ma sobotę w pierwszym tygodniu");
-            for d in [pierwsza.day() as i32, pierwsza.day() as i32 + 7] {
-                if let Some(x) = NaiveDate::from_ymd_opt(rok, m, d as u32 + 6) {
-                    assert_eq!(x.weekday(), Weekday::Fri, "odstęp sobót to 7 dni");
-                }
-            }
-            if let Some(p) = poprzednia {
-                if p != pierwsza.day() {
-                    przesuniecia += 1;
-                }
-            }
-            poprzednia = Some(pierwsza.day());
+    fn dwucyfrowa_liczba_miesci_sie_w_kratce() {
+        let fonts = Fonts::embedded();
+        for rot in [Rotation::Portrait, Rotation::Landscape] {
+            let c = Gray8::new(rot);
+            let p = Plan::of(&c, &fonts);
+            let szer = fonts.measure("28", p.stopien, Weight::Bold);
+            assert!(
+                szer < p.cell_w as f32,
+                "{rot:?}: \"28\" ma {szer:.1} px przy kratce {} px",
+                p.cell_w
+            );
+            assert!(
+                p.stopien >= 17.0,
+                "{rot:?}: stopień {} zszedł poniżej czytelności",
+                p.stopien
+            );
         }
-        assert!(
-            przesuniecia >= 10,
-            "pas musi się przesuwać, a nie stać pionowo"
-        );
     }
 
+    /// Święto zalewa kratkę; spotkanie nie robi NIC. Ten widok z założenia nie mówi
+    /// o zajętości — gdyby mówił, wróciłby do wersji, którą trzeba było wyrzucić.
     #[test]
-    fn swieto_znaczy_swieto_a_spotkanie_nie() {
-        let mut m = pusty(2026, 1, 15);
-        m.known = Some((
-            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 1, 31).unwrap(),
-        ));
+    fn swieto_zalewa_kratke_a_spotkanie_nie() {
+        let fonts = Fonts::embedded();
         let nowy_rok = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        m.days = vec![DayGroup {
-            date: nowy_rok,
-            events: vec![crate::model::CalEvent {
-                start: nowy_rok.and_hms_opt(0, 0, 0).unwrap(),
-                end: nowy_rok.and_hms_opt(23, 59, 0).unwrap(),
-                all_day: true,
-                title: "Nowy Rok".into(),
-                location: None,
-                source: SourceTag::Holiday,
-            }],
-        }];
-        let info = scan(&m, 2026);
-        assert!(info[0][0].swieto, "1 stycznia powinno być świętem");
+
+        let mut ze_swietem = model_na(2026, 6, 15);
+        ze_swietem.days = vec![wydarzenie(nowy_rok, SourceTag::Holiday)];
+        let mut c1 = Gray8::new(Rotation::Portrait);
+        render_year(&ze_swietem, &fonts, &mut c1);
+
+        let mut ze_spotkaniem = model_na(2026, 6, 15);
+        ze_spotkaniem.days = vec![wydarzenie(nowy_rok, SourceTag::Primary)];
+        let mut c2 = Gray8::new(Rotation::Portrait);
+        render_year(&ze_spotkaniem, &fonts, &mut c2);
+
+        let p = Plan::of(&c1, &fonts);
+        let swieto = zalane_procent(&c1, &p, 0, 1, 2026);
+        let spotkanie = zalane_procent(&c2, &p, 0, 1, 2026);
         assert!(
-            !info[0][1].swieto,
-            "2 stycznia nie jest świętem, choć leży w oknie"
+            swieto > 50,
+            "święto pokryte w {swieto}%, oczekiwano zalewki"
         );
         assert!(
-            info[0][14].znany,
-            "15 stycznia leży w oknie, więc jest znany"
+            spotkanie < 25,
+            "spotkanie pokryte w {spotkanie}% — ten widok nie mówi o zajętości"
         );
-        assert!(!info[0][14].swieto);
     }
 
     #[test]
-    fn przeszlosc_nie_jest_wyszarzana() {
-        // Widok roczny służy m.in. do dat historycznych — struktura roku musi być
-        // narysowana w całości, także przed dzisiaj.
-        let m = pusty(2026, 12, 20);
+    fn nie_wychodzi_atramentem_na_krawedzie() {
         let fonts = Fonts::embedded();
-        let mut c = Gray8::new(Rotation::Portrait);
-        render_year(&m, &fonts, &mut c);
-        let g = Grid::of(&c);
-        // Niedziela 4 stycznia 2026 — dawno miniona, a rastrowana jak każda inna.
-        let cell = g.cell(0, 3);
-        assert_eq!(
-            NaiveDate::from_ymd_opt(2026, 1, 4).unwrap().weekday(),
-            Weekday::Sun
-        );
-        let atrament = (cell.y..cell.y + cell.h)
-            .flat_map(|y| (cell.x..cell.x + cell.w).map(move |x| (x, y)))
-            .filter(|&(x, y)| c.get(x, y) < WHITE)
-            .count();
-        assert!(atrament > 0, "miniona niedziela musi być oznaczona");
-    }
-
-    #[test]
-    fn renderuje_sie_w_obu_orientacjach_bez_atramentu_na_krawedziach() {
-        let mut m = pusty(2026, 8, 18);
-        m.known = Some((
-            NaiveDate::from_ymd_opt(2026, 8, 10).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 8, 26).unwrap(),
-        ));
-        let fonts = Fonts::embedded();
+        let m = model_na(2026, 8, 18);
         for rot in [Rotation::Portrait, Rotation::Landscape] {
             let mut c = Gray8::new(rot);
             render_year(&m, &fonts, &mut c);
-            let (w, h) = (c.width() as i32, body_h(&c));
+            let (w, h) = (c.width() as i32, c.height() as i32);
             for y in 0..h {
                 assert_eq!(c.get(0, y), WHITE, "{rot:?}: atrament na lewej krawędzi");
                 assert_eq!(c.get(w - 1, y), WHITE, "{rot:?}: na prawej");
