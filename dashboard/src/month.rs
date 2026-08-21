@@ -410,9 +410,8 @@ mod tests {
             let m = model_na(rok, mies, 1);
             let mut c = Gray8::new(Rotation::Portrait);
             let g = Grid::of(&c);
-            assert_eq!(
+            assert!(
                 g.cell(0, WEEKS - 1).bottom() <= body_h(&c) - FOOT_H,
-                true,
                 "{rok}-{mies}: szósty tydzień wychodzi poza siatkę"
             );
             render_month(&m, &Fonts::embedded(), &mut c);

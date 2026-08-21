@@ -673,10 +673,12 @@ mod tests {
                 "{nazwa} = {v:#04X} jest poza zakresem wypełnień"
             );
         }
-        assert!(
-            LIGHTEST_VISIBLE >> 4 <= 9,
-            "granica widoczności przesunięta za wysoko"
-        );
+        const {
+            assert!(
+                LIGHTEST_VISIBLE >> 4 <= 9,
+                "granica widoczności przesunięta za wysoko"
+            )
+        };
     }
 
     #[test]

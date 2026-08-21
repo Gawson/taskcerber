@@ -82,7 +82,6 @@ impl Geom {
     }
 }
 
-/// Wysokość paska statusu w nagłówku i jego odsunięcie od krawędzi.
 // ---------------------------------------------------------------------------
 // Typografia na e-papierze: dolna granica jest twarda
 // ---------------------------------------------------------------------------
@@ -153,6 +152,7 @@ pub(crate) const TEXT_BODY: f32 = 22.0;
 /// zniknięcie całej listy.
 pub(crate) const TEXT_FLOOR: f32 = 19.0;
 
+// Pasek statusu w nagłówku: rozmiar pisma, odsunięcie od krawędzi i pozycja pigułki.
 const STATUS_SIZE: f32 = TEXT_BODY;
 const STATUS_PAD: i32 = 10;
 const STATUS_PILL_TOP: i32 = 66;

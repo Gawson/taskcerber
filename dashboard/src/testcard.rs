@@ -220,66 +220,6 @@ pub fn render_test_card(fonts: &Fonts, c: &mut Gray8) -> Rect {
     refreshed
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::canvas::Rotation;
-
-    #[test]
-    fn dither_ma_zadana_gestosc() {
-        // Bayer 4x4 przy prostokącie będącym wielokrotnością 4 daje DOKŁADNIE
-        // `level`/16 czarnych pikseli — bez tego porównanie z półtonem nic nie znaczy.
-        for level in 0..=16u8 {
-            let mut c = Gray8::new(Rotation::Portrait);
-            let r = Rect::new(0, 0, 16, 16);
-            dither_rect(&mut c, r, level);
-            let czarne = (0..16)
-                .flat_map(|y| (0..16).map(move |x| (x, y)))
-                .filter(|&(x, y)| c.get(x, y) == BLACK)
-                .count();
-            assert_eq!(
-                czarne,
-                level as usize * 16,
-                "gęstość dla poziomu {level} się nie zgadza"
-            );
-        }
-    }
-
-    #[test]
-    fn karta_miesci_sie_w_plotnie_i_nie_jest_pusta() {
-        let fonts = Fonts::embedded();
-        for rot in [Rotation::Portrait, Rotation::Landscape] {
-            let mut c = Gray8::new(rot);
-            let du = render_test_card(&fonts, &mut c);
-            assert!(
-                du.x >= 0 && du.right() <= c.width() as i32,
-                "{rot:?}: DU poza płótnem"
-            );
-            assert!(
-                du.y >= 0 && du.bottom() <= c.height() as i32,
-                "{rot:?}: DU poza płótnem"
-            );
-            let atrament = c.pixels().iter().filter(|&&p| p != WHITE).count();
-            assert!(atrament > 10_000, "{rot:?}: karta wyszła prawie pusta");
-        }
-    }
-
-    #[test]
-    fn wszystkie_szesnascie_poziomow_trafia_na_plotno() {
-        let fonts = Fonts::embedded();
-        let mut c = Gray8::new(Rotation::Portrait);
-        render_test_card(&fonts, &mut c);
-        // Każdy poziom 4-bitowy ma się pojawić jako plama — inaczej drabina kłamie.
-        for n in 0..16u8 {
-            let want = level_byte(n);
-            assert!(
-                c.pixels().contains(&want),
-                "poziomu {n:X} ({want:02X}) nie ma na karcie"
-            );
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Karta jednorodności
 // ---------------------------------------------------------------------------
@@ -458,4 +398,64 @@ pub fn render_uniformity_card(fonts: &Fonts, c: &mut Gray8) -> Rect {
     );
 
     du
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canvas::Rotation;
+
+    #[test]
+    fn dither_ma_zadana_gestosc() {
+        // Bayer 4x4 przy prostokącie będącym wielokrotnością 4 daje DOKŁADNIE
+        // `level`/16 czarnych pikseli — bez tego porównanie z półtonem nic nie znaczy.
+        for level in 0..=16u8 {
+            let mut c = Gray8::new(Rotation::Portrait);
+            let r = Rect::new(0, 0, 16, 16);
+            dither_rect(&mut c, r, level);
+            let czarne = (0..16)
+                .flat_map(|y| (0..16).map(move |x| (x, y)))
+                .filter(|&(x, y)| c.get(x, y) == BLACK)
+                .count();
+            assert_eq!(
+                czarne,
+                level as usize * 16,
+                "gęstość dla poziomu {level} się nie zgadza"
+            );
+        }
+    }
+
+    #[test]
+    fn karta_miesci_sie_w_plotnie_i_nie_jest_pusta() {
+        let fonts = Fonts::embedded();
+        for rot in [Rotation::Portrait, Rotation::Landscape] {
+            let mut c = Gray8::new(rot);
+            let du = render_test_card(&fonts, &mut c);
+            assert!(
+                du.x >= 0 && du.right() <= c.width() as i32,
+                "{rot:?}: DU poza płótnem"
+            );
+            assert!(
+                du.y >= 0 && du.bottom() <= c.height() as i32,
+                "{rot:?}: DU poza płótnem"
+            );
+            let atrament = c.pixels().iter().filter(|&&p| p != WHITE).count();
+            assert!(atrament > 10_000, "{rot:?}: karta wyszła prawie pusta");
+        }
+    }
+
+    #[test]
+    fn wszystkie_szesnascie_poziomow_trafia_na_plotno() {
+        let fonts = Fonts::embedded();
+        let mut c = Gray8::new(Rotation::Portrait);
+        render_test_card(&fonts, &mut c);
+        // Każdy poziom 4-bitowy ma się pojawić jako plama — inaczej drabina kłamie.
+        for n in 0..16u8 {
+            let want = level_byte(n);
+            assert!(
+                c.pixels().contains(&want),
+                "poziomu {n:X} ({want:02X}) nie ma na karcie"
+            );
+        }
+    }
 }
