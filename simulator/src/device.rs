@@ -293,6 +293,23 @@ impl Device {
         }
 
         match action {
+            Action::SetView(v) => {
+                // Przełączenie widoku zeruje nawigację WEWNĄTRZ widoku: strona agendy
+                // i rozwinięte wydarzenie nie znaczą nic w siatce miesiąca, a zostawione
+                // wracałyby przy powrocie w miejsce, którego użytkownik już nie pamięta.
+                //
+                // Stuknięcie w AKTYWNĄ zakładkę też tu wchodzi i to jest jego jedyne
+                // działanie: wyjście ze szczegółów na wierzch bieżącego widoku.
+                let zmiana = self.model.view != v
+                    || self.model.focus.is_some()
+                    || self.model.page != 0;
+                self.model.view = v;
+                self.model.focus = None;
+                self.model.page = 0;
+                if zmiana {
+                    self.repaint();
+                }
+            }
             Action::NextPage => {
                 if self.model.page + 1 < self.screen.pages {
                     self.model.page += 1;

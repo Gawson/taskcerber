@@ -23,6 +23,11 @@ pub enum Action {
     Back,
     /// Otwórz ekran konfiguracji.
     OpenSetup,
+    /// Przełącz na wskazany widok.
+    ///
+    /// Wskazany, a nie „następny": przy trzech widokach cykl kazałby stukać dwa razy
+    /// i płacić dwoma pełnymi odświeżeniami za przejście, które jest jednym ruchem.
+    SetView(crate::model::View),
 
     // --- ekran konfiguracji -------------------------------------------------
     // Znak jest w akcji, a nie w indeksie klawisza, i to jest celowe: układ

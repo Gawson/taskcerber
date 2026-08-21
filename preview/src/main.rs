@@ -118,8 +118,8 @@ fn main() {
                 dashboard::render_test_card(&fonts, &mut canvas);
                 0
             }
-            Scene::Month(model) => dashboard::render_month(model, &fonts, &mut canvas).hits.len(),
-            Scene::Year(model) => dashboard::render_year(model, &fonts, &mut canvas).hits.len(),
+            Scene::Month(model) => dashboard::render(model, &fonts, &mut canvas).hits.len(),
+            Scene::Year(model) => dashboard::render(model, &fonts, &mut canvas).hits.len(),
             Scene::Uniformity => {
                 dashboard::render_uniformity_card(&fonts, &mut canvas);
                 0
@@ -321,6 +321,8 @@ fn scenario_offline() -> Model {
 /// wygląda tak samo". Zakres pobranych dni celowo kończy się przed końcem miesiąca,
 /// żeby było widać różnicę między „nic nie ma" a „nie wiem".
 fn scenario_miesiac() -> Model {
+    // Widok jest wybierany przez model, nie przez wywołanie — dokładnie tak,
+    // jak robi to firmware.
     let mut m = base(dt(18, 7, 15));
     let gestosc: [(u32, usize); 12] = [
         (10, 1),
@@ -346,6 +348,7 @@ fn scenario_miesiac() -> Model {
                 .collect(),
         })
         .collect();
+    m.view = dashboard::View::Month;
     m
 }
 
@@ -393,6 +396,7 @@ fn scenario_rok() -> Model {
     }
     m.days = days;
     m.known = Some((start, start + chrono::Duration::days(364)));
+    m.view = dashboard::View::Year;
     m
 }
 

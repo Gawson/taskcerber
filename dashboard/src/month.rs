@@ -52,6 +52,14 @@ use crate::model::Model;
 use crate::shapes::hline;
 use crate::text::{Align, Fonts, Weight};
 
+/// Wysokość dostępna dla treści: płótno bez pasa zakładek.
+///
+/// Widok rysuje się nad paskiem, a nie pod nim — bez tego stopka wpadałaby pod
+/// zakładki i znikała.
+fn body_h(c: &Gray8) -> i32 {
+    c.height() as i32 - crate::nav::tabs_h(c)
+}
+
 /// Ile tygodni rysujemy zawsze.
 ///
 /// Sześć, nie „tyle, ile trzeba": miesiąc rozkłada się na pięć albo sześć tygodni
@@ -85,7 +93,7 @@ struct Grid {
 impl Grid {
     fn of(c: &Gray8) -> Self {
         let w = c.width() as i32;
-        let h = c.height() as i32;
+        let h = body_h(c);
         let margin = 12;
         let usable_w = w - 2 * margin;
         let usable_h = h - HEAD_H - FOOT_H;
@@ -236,7 +244,7 @@ pub fn render_month(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     }
 
     // --- stopka ------------------------------------------------------------
-    let foot = c.height() as i32 - FOOT_H;
+    let foot = body_h(c) - FOOT_H;
     hline(c, g.margin, foot, w - 2 * g.margin, 1, INK_FAINT);
     let podpis = match zakres {
         Some((a, b)) => format!(
@@ -403,7 +411,7 @@ mod tests {
             let mut c = Gray8::new(Rotation::Portrait);
             let g = Grid::of(&c);
             assert_eq!(
-                g.cell(0, WEEKS - 1).bottom() <= c.height() as i32 - FOOT_H,
+                g.cell(0, WEEKS - 1).bottom() <= body_h(&c) - FOOT_H,
                 true,
                 "{rok}-{mies}: szósty tydzień wychodzi poza siatkę"
             );
@@ -459,7 +467,7 @@ mod tests {
             let mut c = Gray8::new(rot);
             render_month(&m, &fonts, &mut c);
             let w = c.width() as i32;
-            let h = c.height() as i32;
+            let h = body_h(&c);
             for y in 0..h {
                 assert_eq!(c.get(0, y), WHITE, "{rot:?}: atrament na lewej krawędzi");
                 assert_eq!(

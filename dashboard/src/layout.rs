@@ -18,7 +18,7 @@ use crate::canvas::{
 use crate::hit::{Action, HitRegion, Screen};
 use crate::model::{
     data_dzien_miesiac, dzien_skrot, godzina, naglowek_dnia, za_ile, Battery, CalEvent, Model,
-    NetState, SourceTag,
+    NetState, SourceTag, View,
 };
 // `Page` w tym module to strona AGENDY (paginacja). Strona klawiatury
 // przychodzi pod aliasem, żeby te dwa pojęcia nie udawały jednego.
@@ -56,7 +56,10 @@ struct Geom {
 impl Geom {
     fn of(c: &Gray8) -> Self {
         let w = c.width() as i32;
-        let h = c.height() as i32;
+        // `h` to wysokość CIAŁA ekranu, a nie płótna: pas zakładek jest odjęty raz,
+        // tutaj, i dzięki temu cała reszta geometrii — stopka, treść, paginacja —
+        // nie musi o nim wiedzieć.
+        let h = c.height() as i32 - crate::nav::tabs_h(c);
 
         let header_h = 104;
         // W pionie jest zapas wysokości i wersja firmware'u dostaje własny wiersz pod
@@ -183,7 +186,36 @@ const EVENT_H_WITH_LOCATION: i32 = 62;
 const DAY_GAP: i32 = 14;
 
 /// Rysuje pełny dashboard i zwraca obszary dotykowe.
+/// Rysuje ekran główny — ten widok, który jest w [`Model::view`], plus pasek zakładek.
+///
+/// To jedyny punkt, w którym wybiera się widok. Firmware woła wyłącznie tę funkcję
+/// i nie wie, że istnieje więcej niż jeden ekran; `preview` i symulator też.
 pub fn render(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
+    let mut screen = match model.view {
+        View::Agenda => render_agenda_screen(model, fonts, c),
+        View::Month => crate::month::render_month(model, fonts, c),
+        View::Year => crate::year::render_year(model, fonts, c),
+    };
+
+    crate::nav::draw_tabs(model.view, fonts, c, &mut screen);
+
+    // Kwantyzujemy SAM PAS, bo widok zrobił już swoją treść i `ink_level`
+    // **nie jest idempotentna**: 0x22 wychodzi jako 0x11, a 0x11 jako 0x00.
+    // Drugi przebieg po całym płótnie zwęgliłby wszystkie tony do czerni —
+    // wyszłoby to dopiero na szkle, bo w podglądzie różnica poziomu 1 od 0
+    // jest ledwo widoczna.
+    let pas = Rect::new(
+        0,
+        c.height() as i32 - crate::nav::tabs_h(c),
+        c.width() as i32,
+        crate::nav::tabs_h(c),
+    );
+    c.quantize_ink_rect(pas);
+
+    screen
+}
+
+fn render_agenda_screen(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     c.clear(WHITE);
 
     let mut screen = Screen::default();

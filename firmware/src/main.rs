@@ -1246,6 +1246,29 @@ fn interactive_loop(
                 model.page = model.page.min(screen.pages.saturating_sub(1));
                 repainted = true;
             }
+            Action::SetView(v) => {
+                // Przełączenie widoku zeruje nawigację WEWNĄTRZ widoku: numer strony
+                // agendy i rozwinięte wydarzenie nie znaczą nic w siatce miesiąca,
+                // a zostawione wracałyby przy powrocie w miejsce, którego użytkownik
+                // już nie pamięta.
+                //
+                // Stuknięcie w AKTYWNĄ zakładkę też tu trafia i ma jedno działanie:
+                // wyjście ze szczegółów wydarzenia na wierzch bieżącego widoku.
+                model.view = v;
+                model.focus = None;
+                model.page = 0;
+                (canvas, screen) = repaint(
+                    epd,
+                    &model,
+                    state,
+                    temperature_c,
+                    rotation,
+                    Refresh::Full,
+                    &mut panel_synced,
+                    (canvas, screen),
+                );
+                repainted = true;
+            }
             Action::NextPage => {
                 model.page += 1;
                 (canvas, screen) = repaint(

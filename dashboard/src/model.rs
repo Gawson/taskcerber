@@ -6,6 +6,35 @@
 
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 
+/// Który widok jest pokazywany.
+///
+/// Kolejność wariantów jest kolejnością zakładek na ekranie i to jest jedyne
+/// miejsce, gdzie ta kolejność jest zapisana — [`View::ALL`] karmi zarówno
+/// rysowanie paska, jak i testy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// Lista najbliższych wydarzeń — widok domyślny.
+    #[default]
+    Agenda,
+    /// Siatka miesiąca.
+    Month,
+    /// Planer roczny.
+    Year,
+}
+
+impl View {
+    pub const ALL: [View; 3] = [View::Agenda, View::Month, View::Year];
+
+    /// Napis na zakładce. Krótki, bo segment ma 180 px w pionie.
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Agenda => "agenda",
+            View::Month => "miesiąc",
+            View::Year => "rok",
+        }
+    }
+}
+
 /// Kompletny stan do wyrenderowania jednej klatki.
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -34,6 +63,8 @@ pub struct Model {
     ///
     /// `None` = urządzenie nic nie pobrało; wtedy nie wie nic o żadnym dniu.
     pub known: Option<(NaiveDate, NaiveDate)>,
+    /// Który widok jest na ekranie.
+    pub view: View,
 }
 
 impl Model {
@@ -49,6 +80,7 @@ impl Model {
             page: 0,
             known: None,
             focus: None,
+            view: View::default(),
         }
     }
 

@@ -18,6 +18,7 @@
 //!   Esc      powrót z widoku szczegółów G  duchy po szybkim odświeżaniu wł/wył
 //!   R        ponowne pobranie kanału    S  zrzut PNG do out/simulator.png
 //!   1–4      scenariusze demonstracyjne Q  wyjście
+//!   A M Y    agenda / miesiąc / rok
 //! ```
 
 mod device;
@@ -128,6 +129,12 @@ fn main() {
                 // albo plakietka „skonfiguruj urządzenie"); tutaj skrótem, bo
                 // trafianie myszą w 15-pikselowy napis jest testem cierpliwości.
                 Key::K => dev.apply(Action::OpenSetup),
+                // Widoki pod A/M/Y. Cyfry są zajęte przez scenariusze, a klawisz
+                // ma tu odpowiadać pierwszej literze zakładki, nie jej numerowi —
+                // przy dokładaniu czwartego widoku numer i tak by się przesunął.
+                Key::A => dev.apply(Action::SetView(dashboard::View::Agenda)),
+                Key::M => dev.apply(Action::SetView(dashboard::View::Month)),
+                Key::Y => dev.apply(Action::SetView(dashboard::View::Year)),
                 Key::Right => dev.apply(Action::NextPage),
                 Key::Left => dev.apply(Action::PrevPage),
                 Key::Escape => dev.apply(Action::Back),
@@ -314,7 +321,7 @@ fn draw(
             format!("{source}   ·   stukaj w klawisze myszą   ·   zapisz=wyjście z konfiguracji")
         }
         None => format!(
-            "{source}   ·   spacja=odśwież  ←→=strony  B=bateria  N=sieć  K=konfiguracja  S=PNG  Q=wyjście"
+            "{source}   ·   A/M/Y=widok  ←→=strony  spacja=odśwież  B=bateria  N=sieć  K=konfiguracja  Q=wyjście"
         ),
     };
 
@@ -391,6 +398,7 @@ Klawiatura:
   R       pobierz ponownie      S  zrzut PNG
   K       ekran konfiguracji    Q  wyjście
   1-4     scenariusze
+  A M Y   agenda / miesiąc / rok
 
 Ekran konfiguracji obsługuje się myszą jak palcem — to te same regiony dotykowe,
 które dostanie firmware z GT911. Na urządzeniu wchodzi się w niego dotknięciem

@@ -43,6 +43,14 @@ use crate::model::{Model, SourceTag};
 use crate::shapes::hline;
 use crate::text::{Align, Fonts, Weight};
 
+/// Wysokość dostępna dla treści: płótno bez pasa zakładek.
+///
+/// Widok rysuje się nad paskiem, a nie pod nim — bez tego stopka wpadałaby pod
+/// zakładki i znikała.
+fn body_h(c: &Gray8) -> i32 {
+    c.height() as i32 - crate::nav::tabs_h(c)
+}
+
 const MONTHS: i32 = 12;
 const MAX_DAYS: i32 = 31;
 
@@ -66,7 +74,7 @@ struct Grid {
 
 impl Grid {
     fn of(c: &Gray8) -> Self {
-        let (w, h) = (c.width() as i32, c.height() as i32);
+        let (w, h) = (c.width() as i32, body_h(c));
         let margin = 12;
         let grid_x = margin + LABEL_W;
         let row_h = (h - HEAD_H - FOOT_H) / MONTHS;
@@ -236,7 +244,7 @@ pub fn render_year(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     }
 
     // --- stopka ------------------------------------------------------------
-    let foot = c.height() as i32 - FOOT_H;
+    let foot = body_h(c) - FOOT_H;
     hline(c, g.margin, foot, w - 2 * g.margin, 1, INK_FAINT);
     legenda(c, fonts, &g, foot, model, year);
 
@@ -287,6 +295,7 @@ fn obwodka(c: &mut Gray8, r: Rect, t: i32) {
 
 /// Legenda plus uczciwe zdanie o tym, dokąd sięgają dane.
 fn legenda(c: &mut Gray8, fonts: &Fonts, g: &Grid, foot: i32, model: &Model, year: i32) {
+    let w_pelne = c.width() as i32;
     let y = foot + 30;
     let mut x = g.margin;
     let próbka = 16;
@@ -333,7 +342,7 @@ fn legenda(c: &mut Gray8, fonts: &Fonts, g: &Grid, foot: i32, model: &Model, yea
     fonts.draw(
         c,
         &zasieg,
-        (c.width() as i32 - g.margin) as f32,
+        (w_pelne - g.margin) as f32,
         y as f32,
         TEXT_FLOOR,
         Weight::Medium,
@@ -379,7 +388,7 @@ mod tests {
             let g = Grid::of(&c);
             let ost = g.cell(MONTHS - 1, MAX_DAYS - 1);
             assert!(
-                ost.y + ost.h <= c.height() as i32 - FOOT_H,
+                ost.y + ost.h <= body_h(&c) - FOOT_H,
                 "{rot:?}: grudzień wchodzi w stopkę"
             );
             assert!(
@@ -486,7 +495,7 @@ mod tests {
         for rot in [Rotation::Portrait, Rotation::Landscape] {
             let mut c = Gray8::new(rot);
             render_year(&m, &fonts, &mut c);
-            let (w, h) = (c.width() as i32, c.height() as i32);
+            let (w, h) = (c.width() as i32, body_h(&c));
             for y in 0..h {
                 assert_eq!(c.get(0, y), WHITE, "{rot:?}: atrament na lewej krawędzi");
                 assert_eq!(c.get(w - 1, y), WHITE, "{rot:?}: na prawej");

@@ -23,6 +23,7 @@ pub mod hit;
 pub mod layout;
 pub mod model;
 pub mod month;
+pub mod nav;
 pub mod setup;
 pub mod shapes;
 pub mod testcard;
@@ -34,7 +35,7 @@ pub use canvas::{
 };
 pub use hit::{Action, HitRegion, Screen, Visual};
 pub use layout::{render, render_saved, render_setup};
-pub use model::{Battery, CalEvent, DayGroup, Model, NetState, SourceTag, Tile};
+pub use model::{Battery, CalEvent, DayGroup, Model, NetState, SourceTag, Tile, View};
 pub use month::render_month;
 pub use setup::{Applied, Caps, Field, Setup};
 pub use testcard::{render_test_card, render_uniformity_card};
