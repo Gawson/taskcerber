@@ -522,7 +522,7 @@ to jako te same siedem pasm obrócone, nie jako siatka.
 **Ten widok nie ma dziś zamówienia ani drogi wejścia** (`Action` bez `OpenWeek`).
 Jego przyjęcie to otwarta decyzja, nie część tego planu.
 
-### 2.5. Mapa gęstości w RTC pod widok roczny — odrzucona
+### 2.5. Mapa gęstości w RTC pod widok roczny — odrzucona (sam widok: zbudowany)
 
 Propozycja: drugi, szeroki przebieg parsera zasilający licznik `[u8; 366]` (366 B, albo
 183 B pakowane po 4 bity) w pamięci RTC, przeżywający deep sleep.
@@ -536,8 +536,33 @@ Odrzucona z czterech powodów, z których każdy wystarczy:
 * bramkowanie szerokiego przebiegu przez `last_content_crc` nie działa: CRC jest znane
   dopiero **po** pobraniu i sparsowaniu, a mapa ma powstać z tego samego przebiegu.
 
-Widok roczny wraca do rozmowy, kiedy ktoś poda liczbę wydarzeń swojego prawdziwego
-kanału ICS w skali roku. Bez tej liczby to jest propozycja, nie plan.
+#### Sprostowanie: odrzucona była mapa, nie widok
+
+Ta sekcja odrzucała **mapę gęstości**, a wnioskiem objęła cały widok roczny. To był
+błąd w rozumowaniu i wyszedł dopiero, gdy padło pytanie, do czego ten ekran ma służyć.
+
+Widok roczny nie służy do gęstości. Służy do **struktury**: gdzie wypadają weekendy
+i święta, w jaki dzień tygodnia jest dana data, ile tygodni dzieli dwie daty. Cała
+ta treść, poza świętami, jest **liczona z kalendarza**, a nie z pobranych danych —
+nie potrzebuje więc ani okna 366 dni, ani `[u8; 366]`, ani bumpa `MAGIC`. Wszystkie
+cztery powody odrzucenia dotyczyły mapy i żaden nie dotyczy siatki.
+
+Zbudowany widok jest w `dashboard/src/year.rs`: dwanaście wierszy miesięcy, trzydzieści
+jeden kolumn dni, weekendy w rastrze (niedziela ciemniejsza od soboty, żeby pas miał
+kierunek), kreska na początku poniedziałku, święto pełnym atramentem, dzisiaj ramką.
+
+#### Co z tego naprawdę potrzebuje szerokiego okna
+
+Tylko **święta**. I to jest tania rzecz, bo kanał świąt to osobne źródło
+(`SourceTag::Holiday`) liczące ~13 wydarzeń rocznie — całodniowych, bez reguł
+powtarzania, więc `MAX_OCCURRENCES` go nie obcina. Szerokie okno dla tego jednego
+źródła nie ma nic wspólnego z 55–70 KB, które pochłonęłoby okno roczne kalendarza
+głównego.
+
+Kierunek do rozważenia: **horyzont per źródło** zamiast jednego globalnego —
+`HORIZON_DAYS` dla kalendarzy z treścią, pełny rok dla kanału świąt. Do czasu takiej
+zmiany widok roczny rysuje prawdziwą siatkę i prawdziwe weekendy, a święta pokazuje
+tylko w pobranym oknie, co stopka mówi wprost.
 
 ---
 

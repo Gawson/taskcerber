@@ -19,6 +19,22 @@
 //! widocznych. Pasek 3 px wysokości na całą szerokość kratki to atrament w poziomie
 //! 0 i widać go z dystansu, z jakiego patrzy się na kalendarz na ścianie.
 //!
+//! # Przeszłość NIE blednie, sąsiednie miesiące owszem
+//!
+//! Wcześniejsza wersja przygaszała dni minione i nie rysowała im pasków. Wyszło
+//! z tego, że pierwsza połowa ekranu była wyblakła przez większość miesiąca —
+//! wyróżnienie, które obejmuje połowę powierzchni, przestaje być wyróżnieniem.
+//! Miniony dzień wygląda więc jak każdy inny.
+//!
+//! Blednie za to to, co naprawdę jest tu tylko gościem: **dni z sąsiednich
+//! miesięcy**, które wpadają w siatkę, żeby tydzień był ciągły. Ich jest najwyżej
+//! kilkanaście i nie należą do tematu ekranu.
+//!
+//! Uwaga na paletę: do przygaszenia tekstu służy [`LIGHTEST_VISIBLE`], a **nie**
+//! `INK_FAINT`. Mimo nazwy `INK_FAINT` (0x33) po [`Gray8::quantize_ink`] ląduje na
+//! poziomie 1, czyli praktycznie na czerni — stałe palety są wartościami płótna
+//! sprzed kwantyzacji, nie poziomami panelu.
+//!
 //! # Dzień dzisiejszy jest w negatywie
 //!
 //! Bo to jedyne wyróżnienie, które na tym panelu działa pewnie: ton ma cztery
@@ -27,7 +43,9 @@
 
 use chrono::{Datelike, NaiveDate};
 
-use crate::canvas::{dither_rect, Gray8, Rect, BLACK, INK_FAINT, WHITE};
+use crate::canvas::{
+    dither_rect, Gray8, Rect, BLACK, FILL_LIGHT, INK_FAINT, LIGHTEST_VISIBLE, WHITE,
+};
 use crate::hit::Screen;
 use crate::layout::{TEXT_BODY, TEXT_FLOOR, TEXT_HEAD, TEXT_LEAD};
 use crate::model::Model;
@@ -120,7 +138,7 @@ fn counts_for(model: &Model, year: i32, month: u32) -> [u8; 31] {
 ///
 /// `days` zostaje jako awaryjne źródło dla modeli budowanych ręcznie — w testach
 /// i w podglądzie — które `known` mogą nie mieć.
-fn covered(model: &Model) -> Option<(NaiveDate, NaiveDate)> {
+pub(crate) fn covered_range(model: &Model) -> Option<(NaiveDate, NaiveDate)> {
     if let Some(zakres) = model.known {
         return Some(zakres);
     }
@@ -142,7 +160,7 @@ pub fn render_month(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     // --- nagłówek ----------------------------------------------------------
     fonts.draw(
         c,
-        &crate::model::miesiac_mianownik(today),
+        crate::model::miesiac_mianownik(today),
         g.margin as f32,
         44.0,
         TEXT_HEAD,
@@ -182,32 +200,37 @@ pub fn render_month(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     // --- siatka ------------------------------------------------------------
     let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap_or(today);
     let offset = first.weekday().num_days_from_monday() as i32;
-    let dni_w_miesiacu = dni_miesiaca(year, month);
     let counts = counts_for(model, year, month);
-    let zakres = covered(model);
+    let zakres = covered_range(model);
 
     for row in 0..WEEKS {
         for col in 0..COLS {
             let idx = row * COLS + col - offset;
-            if idx < 0 || idx >= dni_w_miesiacu {
+            // Dni z sąsiednich miesięcy NIE są pomijane: pusta kratka w rogu siatki
+            // każe się domyślać, gdzie miesiąc się zaczyna, a wyblakła data mówi to
+            // wprost. Poza tym 31 marca i 1 kwietnia bywają tym samym tygodniem
+            // i dziura między nimi jest myląca.
+            let Some(data) = first.checked_add_signed(chrono::Duration::days(idx as i64)) else {
                 continue;
-            }
-            let dzien = (idx + 1) as u32;
-            let data = match NaiveDate::from_ymd_opt(year, month, dzien) {
-                Some(d) => d,
-                None => continue,
             };
+            let obcy = data.month() != month;
             let cell = g.cell(col, row);
             let wie = zakres.is_some_and(|(a, b)| data >= a && data <= b);
+            let liczba = if obcy {
+                obcy_count(model, data)
+            } else {
+                counts[idx as usize]
+            };
             draw_day(
                 fonts,
                 c,
                 cell,
-                dzien,
-                counts[idx as usize],
+                data,
+                liczba,
                 data == today,
                 wie,
-                data < today,
+                obcy,
+                today,
             );
         }
     }
@@ -247,17 +270,21 @@ fn draw_day(
     fonts: &Fonts,
     c: &mut Gray8,
     cell: Rect,
-    dzien: u32,
+    data: NaiveDate,
     events: u8,
     dzis: bool,
     wie: bool,
-    minione: bool,
+    // `obcy`: dzień z sąsiedniego miesiąca, w siatce dla ciągłości tygodnia.
+    obcy: bool,
+    today: NaiveDate,
 ) {
     // Dzień poza pobranym zakresem dostaje delikatny raster zamiast pustki —
     // „nie wiem" ma wyglądać inaczej niż „nic nie ma". Dni MINIONE rastru nie
     // dostają, choć urządzenie też o nich nie wie: przeszłość nie jest luką
-    // w wiedzy, tylko czymś, co przestało być pytaniem.
-    if !wie && !minione {
+    // w wiedzy, tylko czymś, co przestało być pytaniem. To jedyne miejsce, gdzie
+    // przeszłość jest traktowana inaczej — sama data i jej paski wyglądają tak
+    // samo jak wszędzie indziej.
+    if !wie && data >= today {
         dither_rect(c, cell.inset(2), 1);
     }
 
@@ -271,7 +298,7 @@ fn draw_day(
     // Numer jest ZAWSZE po lewej, także dzisiaj. Wyśrodkowanie tylko jednej kratki
     // sprawiało, że oko szukało dzisiejszej daty w innym miejscu niż wszystkich
     // pozostałych — wyróżnienie ma przyciągać wzrok, a nie przestawiać rytm.
-    let numer = dzien.to_string();
+    let numer = data.day().to_string();
     let num_w = fonts.measure(&numer, TEXT_LEAD, Weight::Bold).ceil() as i32;
     let plama = Rect::new(cell.x + 2, cell.y + 2, num_w + 2 * pad, 34);
 
@@ -289,20 +316,17 @@ fn draw_day(
         num_base,
         TEXT_LEAD,
         if dzis { Weight::Bold } else { Weight::Medium },
-        match (dzis, minione) {
+        // Dzień z sąsiedniego miesiąca w LIGHTEST_VISIBLE, nie w INK_FAINT.
+        // Wbrew nazwie `INK_FAINT` (0x33) po `quantize_ink` ląduje na poziomie 1,
+        // czyli praktycznie na czerni — wyszarzenie nim jest niewidoczne.
+        // Poziom 3 to najjaśniejszy ton, którym da się na tym panelu pisać.
+        match (dzis, obcy) {
             (true, _) => WHITE,
-            (false, true) => INK_FAINT,
+            (false, true) => LIGHTEST_VISIBLE,
             (false, false) => BLACK,
         },
         Align::Left,
     );
-
-    // Miniony dzień nie dostaje pasków. Gęstość przeszłości nie jest informacją,
-    // po którą ktokolwiek patrzy na kalendarz na ścianie, a atrament zabiera uwagę
-    // dniom, które jeszcze są przed nami.
-    if minione {
-        return;
-    }
 
     // Licznik nadmiaru stoi w WIERSZU NUMERU, po prawej — nie pod paskami.
     // Pod paskami mieścił się tylko w pionie: w poziomie kratka ma 64 px wysokości
@@ -337,25 +361,25 @@ fn draw_day(
     let paski = (events as usize).min(MAX_BARS);
     let mut y = cell.y + 40;
     for _ in 0..paski {
-        c.fill_rect(Rect::new(cell.x + pad, y, cell.w - 2 * pad, BAR_H), BLACK);
+        // Paski obcego miesiąca w słabszym atramencie: informacja zostaje, ale nie
+        // konkuruje z miesiącem, który jest tematem ekranu.
+        let ton = if obcy { FILL_LIGHT } else { BLACK };
+        c.fill_rect(Rect::new(cell.x + pad, y, cell.w - 2 * pad, BAR_H), ton);
         y += BAR_H + BAR_GAP;
     }
 }
 
-/// Ile dni ma miesiąc.
-fn dni_miesiaca(year: i32, month: u32) -> i32 {
-    let (ny, nm) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    match (
-        NaiveDate::from_ymd_opt(ny, nm, 1),
-        NaiveDate::from_ymd_opt(year, month, 1),
-    ) {
-        (Some(a), Some(b)) => (a - b).num_days() as i32,
-        _ => 30,
-    }
+/// Liczba wydarzeń w dniu spoza bieżącego miesiąca.
+///
+/// `counts_for` buduje tablicę indeksowaną dniem miesiąca, więc dla 31 marca
+/// widocznego w siatce kwietnia nie ma tam miejsca. Sąsiednich dni jest najwyżej
+/// dwanaście, więc liniowe przejście po `model.days` jest tańsze niż drugi bufor.
+fn obcy_count(model: &Model, data: NaiveDate) -> u8 {
+    model
+        .days
+        .iter()
+        .find(|d| d.date == data)
+        .map_or(0, |d| d.events.len().min(u8::MAX as usize) as u8)
 }
 
 #[cfg(test)]
@@ -392,7 +416,7 @@ mod tests {
         // Off-by-one w przesunięciu pierwszego dnia gubi 1 albo ostatni dzień —
         // a tego na gotowym obrazku nie widać.
         for (rok, mies, ile) in [(2026, 2, 28), (2028, 2, 29), (2026, 8, 31), (2026, 4, 30)] {
-            assert_eq!(dni_miesiaca(rok, mies), ile, "{rok}-{mies}");
+            assert_eq!(crate::year::dni_miesiaca(rok, mies), ile, "{rok}-{mies}");
             let first = NaiveDate::from_ymd_opt(rok, mies, 1).unwrap();
             let offset = first.weekday().num_days_from_monday() as i32;
             assert!(
@@ -416,7 +440,7 @@ mod tests {
         // Wydarzenia tylko 10 i 24 — środek horyzontu jest pusty, ale ZNANY.
         m.days = vec![];
 
-        let zakres = covered(&m).expect("known ma pierwszeństwo przed days");
+        let zakres = covered_range(&m).expect("known ma pierwszeństwo przed days");
         assert_eq!(zakres.0, NaiveDate::from_ymd_opt(2026, 8, 10).unwrap());
         assert_eq!(zakres.1, NaiveDate::from_ymd_opt(2026, 8, 24).unwrap());
 
@@ -438,7 +462,11 @@ mod tests {
             let h = c.height() as i32;
             for y in 0..h {
                 assert_eq!(c.get(0, y), WHITE, "{rot:?}: atrament na lewej krawędzi");
-                assert_eq!(c.get(w - 1, y), WHITE, "{rot:?}: atrament na prawej krawędzi");
+                assert_eq!(
+                    c.get(w - 1, y),
+                    WHITE,
+                    "{rot:?}: atrament na prawej krawędzi"
+                );
             }
         }
     }

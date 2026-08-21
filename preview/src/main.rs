@@ -32,6 +32,8 @@ enum Scene {
     TestCard,
     /// Widok miesięczny.
     Month(Box<Model>),
+    /// Widok roczny.
+    Year(Box<Model>),
     /// Karta jednorodności tła.
     Uniformity,
     Dash(Box<Model>),
@@ -93,6 +95,7 @@ fn main() {
             ),
         ],
         "miesiac" | "month" => vec![("miesiac", Scene::Month(Box::new(scenario_miesiac())))],
+        "rok" | "year" => vec![("rok", Scene::Year(Box::new(scenario_rok())))],
         "tony" | "testcard" => vec![("tony", Scene::TestCard)],
         "jednorodnosc" | "uniformity" => vec![("jednorodnosc", Scene::Uniformity)],
         "detail" => vec![("detail", {
@@ -116,6 +119,7 @@ fn main() {
                 0
             }
             Scene::Month(model) => dashboard::render_month(model, &fonts, &mut canvas).hits.len(),
+            Scene::Year(model) => dashboard::render_year(model, &fonts, &mut canvas).hits.len(),
             Scene::Uniformity => {
                 dashboard::render_uniformity_card(&fonts, &mut canvas);
                 0
@@ -342,6 +346,53 @@ fn scenario_miesiac() -> Model {
                 .collect(),
         })
         .collect();
+    m
+}
+
+/// Rok z ROCZNYM horyzontem — bo przy dzisiejszych czternastu dniach widok roczny
+/// pokrywa 4% kratek i pokazywałby głównie własną niewiedzę. Ten scenariusz mówi,
+/// jak by wyglądał, gdyby dane były.
+fn scenario_rok() -> Model {
+    use chrono::Datelike;
+    let mut m = base(dt(18, 7, 15));
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let mut days = Vec::new();
+    for i in 0..365i64 {
+        let d = start + chrono::Duration::days(i);
+        // Gęstość udaje prawdziwy kalendarz: robocze gęściej, weekendy rzadziej,
+        // lipiec i sierpień pusto (urlop), grudzień gęsto.
+        let dow = d.weekday().num_days_from_monday();
+        let ile = match (d.month(), dow) {
+            (7..=8, _) => 0,
+            (12, 0..=4) => 4 + (i % 3) as usize,
+            (_, 5..=6) => (i % 2) as usize,
+            _ => 1 + (i % 4) as usize,
+        };
+        if ile == 0 {
+            continue;
+        }
+        days.push(DayGroup {
+            date: d,
+            events: (0..ile).map(|k| ev(d.day(), 8 + k as u32, 0, 9 + k as u32, 0, "x")).collect(),
+        });
+    }
+    // Święta państwowe 2026 — bez nich nie da się ocenić czarnych kratek, a to
+    // jedyne oznaczenie w tym widoku rysowane pełnym atramentem.
+    for (mies, dzien) in [
+        (1u32, 1u32), (1, 6), (4, 5), (4, 6), (5, 1), (5, 3),
+        (5, 24), (6, 4), (8, 15), (11, 1), (11, 11), (12, 25), (12, 26),
+    ] {
+        let d = chrono::NaiveDate::from_ymd_opt(2026, mies, dzien).unwrap();
+        let mut e = ev(dzien, 0, 0, 23, 59, "święto");
+        e.all_day = true;
+        e.source = dashboard::model::SourceTag::Holiday;
+        match days.binary_search_by_key(&d, |g: &DayGroup| g.date) {
+            Ok(i) => days[i].events.push(e),
+            Err(i) => days.insert(i, DayGroup { date: d, events: vec![e] }),
+        }
+    }
+    m.days = days;
+    m.known = Some((start, start + chrono::Duration::days(364)));
     m
 }
 
