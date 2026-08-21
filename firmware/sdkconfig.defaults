@@ -166,6 +166,13 @@ CONFIG_LWIP_ESP_GRATUITOUS_ARP=n
 # ile ten parser potrzebuje. Dlatego 64 KB jest naprawą, a nie zamiataniem;
 # zapas nad zmierzonym szczytem wynosi 25 KB.
 #
+# 64 KB ZOSTAJE także po przeniesieniu budowy regexów na osobny wątek. Powód jest
+# niezależny od kroku sieciowego: statyczna analiza ramek pokazuje, że ścieżka
+# RYSOWANIA (interactive_loop -> repaint -> render_frame -> Fonts::embedded ->
+# ttf_parser) sięga 32 688 B, czyli osiemdziesiąt bajtów pod progiem 32 768.
+# Ostatni obraz, o którym wiemy, że działał, miał na ścieżce sieciowej 2 720 B
+# zapasu — 8%. Powrót do 32 KB wymagałby naprawienia trzech rzeczy naraz, nie jednej.
+#
 # Cena: 32 KB wewnętrznego DRAM-u zabrane ze sterty na stałe. Log pokazuje przy
 # pobieraniu 157 KB wolnego, więc mieści się, ale to jest ten sam DRAM, o który
 # biją się mbedTLS i epdiy — przy dokładaniu czegokolwiek do kroku sieciowego

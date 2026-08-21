@@ -238,6 +238,29 @@ fn run(mut state: RtcState) -> Result<u64> {
         None
     };
 
+    // Silniki regex parsera reguł budujemy TERAZ, na osobnym wątku z własnym stosem.
+    //
+    // To jest naprawa zdiagnozowanego stack overflow. Budowa idzie przez
+    // `regex_automata::meta::strategy::new` — ramka 13 632 B, największa w obrazie —
+    // i razem z drogą do niej potrzebuje ~27 KB. Wykonana leniwie, przy pierwszym
+    // parsowaniu reguły, lądowała na zadaniu `main` w najgłębszym punkcie cyklu:
+    // pod nią leżały już ramki `main` (11 584 B) i `fetch_everything` (5 104 B).
+    //
+    // Przed radiem, żeby te 40 KB nie konkurowało z mbedTLS o wewnętrzny DRAM.
+    // Rozmiar MUSI być jawny: `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` to 8192.
+    match std::thread::Builder::new()
+        .stack_size(40 * 1024)
+        .spawn(icalfeed::warm_up_rrule)
+    {
+        Ok(h) => {
+            let _ = h.join();
+            info!("parser reguł rozgrzany · stos {} B", zapas_stosu_b());
+        }
+        // Bez propagacji: gdyby wątek nie wstał, budowa i tak wydarzy się leniwie —
+        // po prostu tam, gdzie boli.
+        Err(e) => warn!("nie mogę rozgrzać parsera reguł: {e}"),
+    }
+
     // --- 5. Sieć ---------------------------------------------------------------
     //
     // `Epd` powstaje tu TYLKO wtedy, gdy ślad na panelu jest włączony — bo tylko
