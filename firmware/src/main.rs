@@ -84,6 +84,17 @@ const DEFAULT_OTA_URL: &str = "https://gawson.github.io/taskcerber/ota.json";
 /// z podniesioną anteną, a dryf PCF8563 jest dla kalendarza bez znaczenia.
 const SNTP_INTERVAL_S: i64 = 24 * 60 * 60;
 
+/// Ile sekund spać, gdy urządzenie stoi na kablu. Zero wyłącza skrócenie.
+///
+/// To jest udogodnienie dla pracy na sprzęcie, nie polityka energetyczna. W deep
+/// sleepie peryferium USB jest wyłączone i płytka znika z magistrali, więc przy
+/// odstępie pół godziny okno na wgranie firmware'u albo podłączenie monitora
+/// wypadałoby raz na pół godziny. Krótki sen sprawia, że port wraca co kilkanaście
+/// sekund i da się go złapać.
+///
+/// Na baterii bez znaczenia — warunek pyta o obecność USB.
+const USB_SHORT_SLEEP_S: u64 = 8;
+
 const HORIZON_DAYS: i64 = 14;
 
 /// Horyzont kanału świąt — pełny rok z zapasem na przestępny.
@@ -552,10 +563,19 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Wybudzenie przyciskiem zawsze rysuje. Ktoś nacisnął, więc czegoś od urządzenia
     // chce — a za chwilę może chcieć obrócić ekran, co bez świeżej klatki nie ma sensu.
     // Cykl diagnostyczny maluje ZAWSZE: jego jedynym produktem jest ten ekran.
+    // `Stale` NIE wymusza przemalowania i to jest poprawka, nie oszczędność.
+    //
+    // Odkąd pobranie bywa pomijane ze względu na świeżość, `Stale` oznacza sytuację
+    // najzupełniej normalną — „treść z pamięci, w tym cyklu nie sięgaliśmy po sieć".
+    // Traktowanie go jak stanu wyjątkowego kazałoby przemalowywać ekran przy KAŻDYM
+    // takim wybudzeniu, mimo że nic się nie zmieniło. Przy krótkim śnie na kablu
+    // dawało to pełne odświeżenie co kilkadziesiąt sekund.
+    //
+    // Wymuszają je nadal stany, które naprawdę wymagają uwagi.
     let needs_paint = diagnoza
         || content_changed
         || state.boot_count <= 1
-        || net_state != NetState::Ok
+        || matches!(net_state, NetState::Offline | NetState::NeedsAuth)
         || woke_by_button;
 
     // Dotyk NIE zależy od tego, czy akurat malujemy klatkę — zależność idzie
@@ -687,6 +707,19 @@ fn run(mut state: RtcState) -> Result<u64> {
     // --- 7. Sekwencja wyłączania i sen -----------------------------------------
     let sleep_s = if state.fetch_requested {
         FETCH_SOON_S
+    } else if power_status.usb_present && USB_SHORT_SLEEP_S > 0 {
+        // Na kablu śpimy KRÓTKO, i to nie dla świeżości danych, tylko po to, żeby dało
+        // się do urządzenia dobić.
+        //
+        // W deep sleepie peryferium USB jest wyłączone, więc płytka znika z magistrali
+        // i host nie ma czego otworzyć — `espflash` nie może ani wgrać, ani czytać logu.
+        // Przy odstępie pół godziny okno na złapanie portu wypadałoby raz na pół
+        // godziny, co czyni pracę na kablu bezużyteczną.
+        //
+        // Krótki sen nie kosztuje: na kablu energii nie liczymy, a pobrania i tak nie
+        // będzie, bo ocena świeżości go nie przepuści. Cykl bez sieci to boot, ewentualne
+        // przemalowanie i okno dotyku.
+        USB_SHORT_SLEEP_S
     } else {
         let base = policy.sleep_seconds(mode, now);
         power::align_to_minute(now, base.saturating_mul(state.backoff_multiplier()))
