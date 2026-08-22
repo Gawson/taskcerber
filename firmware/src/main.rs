@@ -67,6 +67,17 @@ use crate::store::{Config, Store};
 const VERSION: &str = env!("T5_VERSION");
 
 /// Ile dni do przodu pokazujemy.
+/// Domyślny adres manifestu OTA, gdy w NVS nie ma własnego.
+///
+/// Wskazuje na GitHub Pages tego repozytorium — tam publikuje job `pages` z CI,
+/// tym samym artefaktem, który powstaje z `tools/build-image.sh`. Dzięki temu
+/// urządzenie aktualizuje się bez wklepywania czegokolwiek na ekranowej klawiaturze,
+/// a wpis w konfiguracji zostaje jako NADPISANIE dla własnego serwera.
+///
+/// Zadziała dopiero, gdy repozytorium będzie publiczne: na darmowym planie
+/// GitHub Pages nie obsługuje repozytoriów prywatnych.
+const DEFAULT_OTA_URL: &str = "https://gawson.github.io/taskcerber/ota.json";
+
 const HORIZON_DAYS: i64 = 14;
 
 /// Horyzont kanału świąt — pełny rok z zapasem na przestępny.
@@ -892,17 +903,20 @@ fn fetch_everything(
     okruszek!(BootStep::Ota);
     let mut ota_installed = false;
     if ota_allowed {
-        match config.ota_url.as_deref() {
-            Some(url) => match net::ota::check_and_apply(url, VERSION, store) {
-                Ok(net::ota::Outcome::Installed { version }) => {
-                    info!("OTA: wgrana wersja {version}, restart po wyłączeniu radia");
-                    ota_installed = true;
-                }
-                Ok(net::ota::Outcome::UpToDate) => {}
-                Ok(net::ota::Outcome::Skipped(reason)) => info!("OTA pominięte: {reason}"),
-                Err(e) => warn!("OTA nie powiodło się: {e:#}"),
-            },
-            None => info!("OTA: brak adresu manifestu w NVS — pomijam"),
+        // Własny adres z konfiguracji ma pierwszeństwo; brak wpisu znaczy
+        // „bierz z oficjalnych wydań", a nie „nie aktualizuj się".
+        let manifest = config.ota_url.as_deref().unwrap_or(DEFAULT_OTA_URL);
+        if config.ota_url.is_none() {
+            info!("OTA: brak adresu w NVS, biorę domyślny {DEFAULT_OTA_URL}");
+        }
+        match net::ota::check_and_apply(manifest, VERSION, store) {
+            Ok(net::ota::Outcome::Installed { version }) => {
+                info!("OTA: wgrana wersja {version}, restart po wyłączeniu radia");
+                ota_installed = true;
+            }
+            Ok(net::ota::Outcome::UpToDate) => {}
+            Ok(net::ota::Outcome::Skipped(reason)) => info!("OTA pominięte: {reason}"),
+            Err(e) => warn!("OTA nie powiodło się: {e:#}"),
         }
     }
 

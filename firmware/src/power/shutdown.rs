@@ -152,8 +152,31 @@ pub fn prepare_for_deep_sleep(epd: &mut Epd, board: &Board, keep_touch_alive: bo
     // 2. Port 1 ekspandera (EPD_OE, EPD_MODE, TPS_PWRUP, VCOM_CTRL, TPS_WAKEUP)
     //    należy do epdiy i został już opuszczony przez `epd_poweroff()`.
     //    Sprawdzamy tylko, czy TPS faktycznie zszedł.
+    // Odczyt DWA RAZY, z przerwą — i to nie jest ostrożność na wyrost.
+    //
+    // `PG` czytane natychmiast po `epd_poweroff` ściga się z rozładowaniem szyny:
+    // VPOS/VNEG schodzą przez rezystory upływowe, a nie w zerowym czasie, więc
+    // pojedyncze „power-good = 1" nie odróżnia szyny STOJĄCEJ od szyny, która
+    // właśnie schodzi. Ta różnica jest warta setek miliamperów przez cały sen,
+    // więc nie ma sensu jej zgadywać.
+    //
+    // Drugi odczyt po 50 ms rozstrzyga: jeśli `PG` opadło, to był wyścig i wszystko
+    // jest w porządku. Jeśli nadal stoi — szyna naprawdę nie zeszła i log mówi to
+    // słowem, którego nie da się pomylić z ostrzeżeniem o niczym.
     match board.expander.tps_power_good() {
-        Ok(true) => warn!("TPS65185 nadal zgłasza power-good po epd_poweroff — szyna EPD stoi"),
+        Ok(true) => {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            match board.expander.tps_power_good() {
+                Ok(true) => warn!(
+                    "SZYNA EPD STOI: TPS65185 zgłasza power-good 50 ms po epd_poweroff. \
+                     To jest pobór rzędu setek miliamperów przez cały sen"
+                ),
+                Ok(false) => {
+                    info!("szyna EPD zeszła w ciągu 50 ms — pierwszy odczyt był wyścigiem")
+                }
+                Err(e) => warn!("nie mogę powtórzyć odczytu power-good: {e:#}"),
+            }
+        }
         Ok(false) => {}
         Err(e) => warn!("nie mogę odczytać power-good z PCA9535: {e:#}"),
     }
