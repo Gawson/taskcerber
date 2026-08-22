@@ -200,7 +200,11 @@ pub struct Battery {
 pub enum NetState {
     /// Ostatnie pobranie się udało.
     Ok,
-    /// Dane pochodzą z pamięci; ostatni sukces o podanej godzinie.
+    /// Treść pochodzi z pamięci, a w tym cyklu nie sięgaliśmy po sieć.
+    ///
+    /// To NIE jest stan błędu, mimo nazwy wariantu: wchodzi się w niego także wtedy,
+    /// gdy pobranie po prostu nie było należne, bo dane mają minutę. Na ekranie brzmi
+    /// więc „dane z HH:MM", a nie „nieaktualne od" — patrz `layout::draw_header`.
     Stale { since: NaiveDateTime },
     /// Brak połączenia z siecią.
     Offline,

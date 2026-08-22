@@ -417,7 +417,12 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
 
     let (status_text, status_ink) = match model.net {
         NetState::Ok => (format!("zaktualizowano {}", godzina(model.now)), INK_DIM),
-        NetState::Stale { since } => (format!("nieaktualne od {}", godzina(since)), BLACK),
+        // „Dane z", nie „nieaktualne od". Ten stan pojawia się w sytuacji zupełnie
+        // NORMALNEJ — przy wybudzeniu, w którym pobranie nie było należne, bo treść
+        // ma minutę. Słowo „nieaktualne" sugerowało wtedy usterkę tam, gdzie jej nie
+        // ma, a pełny atrament dokładał alarmu. Wiek treści niesie sama godzina;
+        // ocenę zostawiamy patrzącemu.
+        NetState::Stale { since } => (format!("dane z {}", godzina(since)), INK_DIM),
         NetState::Offline => ("brak sieci".to_string(), BLACK),
         NetState::NeedsAuth => ("skonfiguruj urządzenie".to_string(), BLACK),
         // Pełnym atramentem, bo to komunikat „poczekaj", a nie tło. Wiek treści

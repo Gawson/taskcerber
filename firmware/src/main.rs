@@ -238,7 +238,16 @@ fn run(mut state: RtcState) -> Result<u64> {
             woke_by_button,
         );
 
-    // Czytnik dotyku wstaje PRZED siecią, nie po niej.
+    // Czytnik dotyku wstaje PRZED siecią, nie po niej — BEZWARUNKOWO, gdy okno ma się
+    // otworzyć. Stała `TOUCH_BEFORE_NET`, która to bramkowała, została usunięta i to
+    // jest naprawa poważnej regresji: tworzenie czytnika zniknęło z wnętrza
+    // `interactive_loop`, a przełącznik ustawiony na `false` sprawił, że nie powstawał
+    // NIGDZIE. Dotyk przestał działać w całości, a kontroler bez sekwencji resetu nie
+    // skanuje szkła — więc nie miał czym wystawić przerwania budzącego z deep sleepu.
+    //
+    // Przełącznik postawiłem, podejrzewając wątek dotyku o stack overflow. Winowajcą
+    // była budowa silników regex w `rrule` (ramka 13 632 B), co potwierdził pomiar,
+    // więc powód istnienia tej stałej odpadł — a ona została i szkodziła.
     //
     // Otwierany dopiero w oknie interaktywnym oznaczał, że przez cały czas pobierania
     // — przy kanale 1,18 MB kilkanaście sekund — nikt nie rozmawiał z GT911.
@@ -253,7 +262,7 @@ fn run(mut state: RtcState) -> Result<u64> {
     // `i2c_master` serializuje dostęp semaforem, więc współdzielenie magistrali
     // z TPS65185 i ekspanderem jest bezpieczne. Gdyby to jednak destabilizowało
     // krok sieciowy, dowód będzie w logu: `krok5: pobieram ... DRAM {} KB`.
-    let reader = if interact && TOUCH_BEFORE_NET {
+    let reader = if interact {
         board::gt911::open(&bus, boot_count <= 1)
             .and_then(|touch| TouchReader::spawn(touch).map_err(|e| warn!("{e:#}")).ok())
     } else {
@@ -1293,23 +1302,6 @@ fn unix_to_local(unix: i64, tz: chrono_tz::Tz) -> Option<NaiveDateTime> {
 /// normalnej pracy tego urządzenia, a nie niewiadoma bring-upu — i pilnuje go polityka
 /// trybu, a nie ta stała.
 const RADIO_ONLY_ON_USB: bool = false;
-
-/// Czy budzić kontroler dotyku PRZED krokiem sieciowym.
-///
-/// Włączone rozwiązuje realny problem: przy kanale 1,18 MB przez kilkanaście sekund
-/// nikt nie rozmawia z GT911, więc stuknięcia z tego okresu giną w kontrolerze,
-/// a twardy reset przy otwieraniu kasuje to dotknięcie, które wybudziło urządzenie.
-///
-/// **Domyślnie WYŁĄCZONE, i to jest cofnięcie po zgłoszeniu ze sprzętu.** Zaraz po
-/// włączeniu tej ścieżki cykl zaczął umierać na `RadioUp` i `FetchPrimary` — czyli
-/// dokładnie tam, gdzie wątek dotyku wchodzi w drogę: ~4 KB stosu w wewnętrznym
-/// DRAM-ie obok mbedTLS i transakcja I²C co `SAMPLE_MS` w trakcie uścisku TLS.
-/// Korelacja nie jest dowodem, ale urządzenie ma działać, dopóki dowodu nie ma.
-///
-/// Włącz z powrotem, gdy log ze sprzętu pokaże, że krok sieciowy przechodzi przy
-/// `true` — decyduje linia `krok5: pobieram ... DRAM {} KB` i to, czy po niej
-/// pojawia się `kanał ... : N wydarzeń`.
-const TOUCH_BEFORE_NET: bool = false;
 
 /// Czy wypisywać postęp kroku sieciowego wprost na panel.
 ///
