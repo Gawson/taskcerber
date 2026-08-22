@@ -48,6 +48,11 @@ pub struct Policy {
     /// Koniec okna aktywnego.
     pub day_end: NaiveTime,
     /// Co ile sekund odświeżać w trybie [`Mode::Active`].
+    ///
+    /// Godzina, nie pół. Kalendarz zmienia się rzadko, a każde pobranie to 1,18 MB
+    /// przez radio i kilkanaście sekund anteny w górze — czyli ponad połowa całego
+    /// dobowego budżetu energii idzie właśnie tam. Świeższą treść zawsze da się
+    /// wymusić dotknięciem „odśwież".
     pub active_interval_s: u64,
     /// Co ile sekund w trybie [`Mode::Usb`].
     pub usb_interval_s: u64,
@@ -62,7 +67,7 @@ impl Default for Policy {
         Self {
             day_start: NaiveTime::from_hms_opt(7, 0, 0).unwrap(),
             day_end: NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
-            active_interval_s: 30 * 60,
+            active_interval_s: 60 * 60,
             usb_interval_s: 5 * 60,
             frugal_interval_s: 60 * 60,
             survival_interval_s: 6 * 60 * 60,

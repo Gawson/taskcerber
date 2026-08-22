@@ -78,6 +78,12 @@ const VERSION: &str = env!("T5_VERSION");
 /// GitHub Pages nie obsługuje repozytoriów prywatnych.
 const DEFAULT_OTA_URL: &str = "https://gawson.github.io/taskcerber/ota.json";
 
+/// Jak często synchronizować zegar. Doba.
+///
+/// Patrz uzasadnienie przy wywołaniu: czekanie na SNTP kosztuje do dziesięciu sekund
+/// z podniesioną anteną, a dryf PCF8563 jest dla kalendarza bez znaczenia.
+const SNTP_INTERVAL_S: i64 = 24 * 60 * 60;
+
 const HORIZON_DAYS: i64 = 14;
 
 /// Horyzont kanału świąt — pełny rok z zapasem na przestępny.
@@ -319,6 +325,18 @@ fn run(mut state: RtcState) -> Result<u64> {
     // wyłącznie na kablu. Patrz [`RADIO_ONLY_ON_USB`].
     let radio_allowed = !RADIO_ONLY_ON_USB || power_status.usb_present;
 
+    // OTA sprawdzamy TYLKO na kablu albo na wyraźne życzenie.
+    //
+    // Sprawdzenie manifestu to osobny uścisk TLS i osobne pobranie przy każdym
+    // wybudzeniu — koszt bez adresata, bo nowa wersja pojawia się raz na kilka dni,
+    // a nie co godzinę.
+    //
+    // Kabel zostaje jako SIATKA BEZPIECZEŃSTWA i to jest jego główna rola: gdyby
+    // wydanie okazało się zepsute, podłączenie kabla wystarczy, żeby urządzenie
+    // samo sięgnęło po poprawkę. Bez tego jedyną drogą byłby webflasher.
+    let ota_dozwolone =
+        (power_status.usb_present || requested) && power::may_update(&policy, mode, fuel);
+
     if diagnoza {
         // Sieć pominięta świadomie — patrz wyżej. Stan zgłaszamy jako nieaktualny,
         // żeby ewentualne późniejsze ekrany nie udawały świeżych danych.
@@ -370,7 +388,7 @@ fn run(mut state: RtcState) -> Result<u64> {
             &mut store,
             home_tz,
             now,
-            power::may_update(&policy, mode, fuel),
+            ota_dozwolone,
             migawka_swieza,
             epd_early.as_mut().zip(trace.as_mut()),
         );
@@ -808,14 +826,39 @@ fn fetch_everything(
         info!("RSSI: {rssi} dBm");
     }
 
-    // Czas przed HTTPS — przy CONFIG_MBEDTLS_HAVE_TIME_DATE=y zły zegar to
-    // odrzucony certyfikat.
-    okruszek!(BootStep::Sntp);
-    krok!("SNTP");
-    if let Err(e) = net::time::sync_sntp(&hw.rtc, home_tz) {
-        warn!("SNTP zawiódł: {e:#}");
+    // Czas synchronizujemy RAZ NA DOBĘ, a nie przy każdym wybudzeniu.
+    //
+    // To jest kalendarz, nie synchronizator kamer. PCF8563 dryfuje rzędu sekund na
+    // tydzień; nawet pół roku bez korekty nie przesunie zadania przypisanego do dnia
+    // ani powiadomienia z dokładnością do pół godziny. A czekanie kosztuje do
+    // `SNTP_TIMEOUT` z PODNIESIONĄ ANTENĄ — w logach ze sprzętu dwa razy zeszło
+    // pełne dziesięć sekund i skończyło się na „zostaję przy czasie z RTC".
+    //
+    // Wyjątki, przy których synchronizujemy mimo wszystko:
+    //  * flaga VL zegara — stracił zasilanie, więc jego czas jest śmieciem;
+    //  * brak zapisanej synchronizacji — świeże urządzenie nie wie, która godzina.
+    let zegar_zgubiony = hw.rtc.voltage_low().unwrap_or(true);
+    let od_ostatniej = now_unix_lub_zero() - store.last_sntp_unix();
+    let trzeba_sntp =
+        zegar_zgubiony || store.last_sntp_unix() <= 0 || od_ostatniej >= SNTP_INTERVAL_S;
+
+    if trzeba_sntp {
+        okruszek!(BootStep::Sntp);
+        krok!("SNTP");
+        match net::time::sync_sntp(&hw.rtc, home_tz) {
+            Ok(zrodlo) => {
+                info!("źródło czasu po synchronizacji: {zrodlo:?}");
+                store.set_last_sntp_unix(net::time::now_unix());
+                krok!("czas ustalony");
+            }
+            Err(e) => warn!("SNTP zawiódł: {e:#}"),
+        }
+    } else {
+        info!(
+            "SNTP pominięty — zsynchronizowany {} h temu",
+            od_ostatniej / 3600
+        );
     }
-    krok!("czas ustalony");
 
     let now = net::time::now_local(home_tz).unwrap_or(now);
     let from = now.date().and_hms_opt(0, 0, 0).unwrap_or(now);
@@ -2354,6 +2397,11 @@ fn ms_od_startu() -> u32 {
 fn zapas_stosu_b() -> u32 {
     // SAFETY: `NULL` znaczy „bieżące zadanie"; wywołanie jest tylko odczytem.
     unsafe { esp_idf_svc::sys::uxTaskGetStackHighWaterMark(std::ptr::null_mut()) }
+}
+
+/// Czas unix albo zero, gdy zegar jeszcze nic nie wie.
+fn now_unix_lub_zero() -> i64 {
+    net::time::now_unix().max(0)
 }
 
 fn wolny_dram_kb() -> u32 {

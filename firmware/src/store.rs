@@ -43,6 +43,10 @@ const KEY_BOOT_CRUMB: &str = "boot_crumb";
 // do flasha co pół godziny, czyli kilkadziesiąt tysięcy cykli rocznie za nic.
 const KEY_SNAPSHOT: &str = "cal_snap";
 
+// Kiedy ostatnio udało się zsynchronizować zegar. Jeden zapis na dobę, więc
+// zużycie flasha jest bez znaczenia.
+const KEY_SNTP: &str = "sntp_unix";
+
 const KEY_OTA_TRY_VER: &str = "ota_try_ver";
 const KEY_OTA_TRY_N: &str = "ota_try_n";
 
@@ -225,6 +229,25 @@ impl Store {
             // Bez propagacji: nieudany zapis podręcznej kopii nie ma prawa wywrócić
             // cyklu, w którym pobranie się udało.
             Err(e) => log::warn!("nie mogę zapisać migawki: {e}"),
+        }
+    }
+
+    /// Czas ostatniej udanej synchronizacji SNTP (unix). 0 = nigdy.
+    pub fn last_sntp_unix(&self) -> i64 {
+        self.nvs
+            .get_u64(KEY_SNTP)
+            .ok()
+            .flatten()
+            .map(|v| v as i64)
+            .unwrap_or(0)
+    }
+
+    pub fn set_last_sntp_unix(&mut self, unix: i64) {
+        if unix <= 0 {
+            return;
+        }
+        if let Err(e) = self.nvs.set_u64(KEY_SNTP, unix as u64) {
+            log::warn!("nie mogę zapisać czasu synchronizacji: {e}");
         }
     }
 
