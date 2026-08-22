@@ -206,6 +206,11 @@ fn run(mut state: RtcState) -> Result<u64> {
     let woke_by_button = wakeup.by_human();
     let boot_count = state.boot_count;
 
+    // Ile wewnętrznego DRAM-u jest, ZANIM epdiy cokolwiek weźmie. Bez tej liczby
+    // nie da się powiedzieć, ile on realnie kosztuje — a od tego zależy cały spór
+    // o to, czy panel może współistnieć z mbedTLS.
+    let dram_przed_panelem = wolny_dram_kb();
+
     // Okruszek z poprzedniego cyklu. Jeśli tamten zamilkł w środku, TEN cykl
     // pomija sieć i oddaje panel diagnozie — bo panelu i radia nie wolno trzymać
     // naraz, a pisanie kroków na ekran w trakcie TLS-a powodowało dokładnie tę
@@ -284,8 +289,14 @@ fn run(mut state: RtcState) -> Result<u64> {
     // wtedy jest do czego rysować. Domyślnie nie powstaje i to jest istotne:
     // epdiy trzymane przez czas TLS-a wywraca budżet wewnętrznego DRAM-u.
     // Pełne wyjaśnienie przy [`NET_TRACE_ON_PANEL`].
-    let mut epd_early = if NET_TRACE_ON_PANEL {
-        Some(Epd::new(&bus).context("nie mogę zainicjalizować panelu")?)
+    let mut epd_early = if PANEL_BEFORE_NET || NET_TRACE_ON_PANEL {
+        let e = Epd::new(&bus).context("nie mogę zainicjalizować panelu")?;
+        info!(
+            "panel wstał PRZED siecią · wolny DRAM {} KB (było {} KB)",
+            wolny_dram_kb(),
+            dram_przed_panelem
+        );
+        Some(e)
     } else {
         None
     };
@@ -376,7 +387,9 @@ fn run(mut state: RtcState) -> Result<u64> {
             && !matches!(mode, Mode::Night))
     {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
-        let mut trace = (epd_early.is_some() && power_status.usb_present)
+        // Ślad wymaga WŁASNEJ zgody. Sam fakt, że panel istnieje, nie znaczy, że
+        // wolno na niego pisać w trakcie TLS-a — to była osobna, wcześniejsza awaria.
+        let mut trace = (NET_TRACE_ON_PANEL && epd_early.is_some() && power_status.usb_present)
             .then(|| NetTrace::begin(rotation, temperature));
         let wynik_sieci = fetch_everything(
             peripherals.modem,
@@ -1286,6 +1299,29 @@ const TOUCH_BEFORE_NET: bool = false;
 /// go wolno **wyłącznie ze świadomością, że sam może być przyczyną awarii**, której
 /// się szuka. Przy `false` te same kroki idą do logu.
 const NET_TRACE_ON_PANEL: bool = false;
+
+/// Czy panel ma powstać PRZED krokiem sieciowym.
+///
+/// # Co to sprawdza
+///
+/// Komentarz przy [`NET_TRACE_ON_PANEL`] twierdzi, że epdiy trzymane przez czas TLS-a
+/// „wywraca budżet wewnętrznego DRAM-u". Oparłem to na awarii, która padała przy
+/// „pobieram kalendarz główny" — czyli **dokładnie tam, gdzie później znaleźliśmy
+/// błąd dynamicznych buforów mbedTLS** (`CONFIG_MBEDTLS_DYNAMIC_BUFFER` na ścieżce
+/// TLS 1.3). Bardzo możliwe, że to była ta sama usterka, a wniosek o pamięci był mój
+/// i błędny.
+///
+/// Liczby przemawiają za tym, że był błędny: przy pobieraniu wolnego wewnętrznego
+/// DRAM-u jest ~130 KB, epdiy bierze ~30, a mbedTLS potrzebuje kilkudziesięciu.
+///
+/// Ta stała zmienia **jedną rzecz**: moment powstania `Epd`. Nic nie maluje —
+/// rysowanie śladu ma własną zgodę powyżej, bo to była osobna awaria i mieszanie
+/// ich w jednym przełączniku było błędem, który już raz kosztował rundę na sprzęcie.
+///
+/// Jeśli krok sieciowy przechodzi przy `true`, zakaz rysowania przed siecią jest
+/// nieaktualny — a wtedy da się narysować migawkę od razu po wybudzeniu i pokazać
+/// stan pobierania, zamiast kilkunastu sekund ciszy z kwadracikiem uśpienia.
+const PANEL_BEFORE_NET: bool = true;
 
 /// Czy urządzenie ma zostawiać kontroler dotyku przy życiu na czas snu, żeby
 /// dotknięcie mogło je obudzić.
