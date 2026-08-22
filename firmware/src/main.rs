@@ -342,9 +342,9 @@ fn run(mut state: RtcState) -> Result<u64> {
                 m.events.clone(),
                 fuel,
                 power_status.usb_present,
-                NetState::Fetching {
-                    since: unix_to_local(state.last_success_unix, home_tz).unwrap_or(now),
-                },
+                // Wiek treści bierzemy Z MIGAWKI, nie z pamięci RTC: tamta nie
+                // przeżywa restartu przez USB, więc po każdym pokazywała epokę.
+                NetState::Fetching { since: m.saved_at },
                 m.known,
                 m.known_holidays,
             );
@@ -480,6 +480,7 @@ fn run(mut state: RtcState) -> Result<u64> {
                         holidays: swieta_z_wydarzen(&events),
                         known,
                         known_holidays,
+                        saved_at: net::time::now_local(home_tz),
                     };
                     store.save_snapshot(&snap, content_crc, state.last_content_crc);
                 }

@@ -420,8 +420,13 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         NetState::Stale { since } => (format!("nieaktualne od {}", godzina(since)), BLACK),
         NetState::Offline => ("brak sieci".to_string(), BLACK),
         NetState::NeedsAuth => ("skonfiguruj urządzenie".to_string(), BLACK),
-        // Pełnym atramentem, bo to komunikat „poczekaj", a nie tło.
-        NetState::Fetching { since } => (format!("pobieram… (z {})", godzina(since)), BLACK),
+        // Pełnym atramentem, bo to komunikat „poczekaj", a nie tło. Wiek treści
+        // dopisujemy tylko wtedy, gdy go znamy — wcześniejsza wersja brała go
+        // z pamięci RTC, która nie przeżywa restartu, i wypisywała epokę: „z 01:00".
+        NetState::Fetching { since: Some(t) } => {
+            (format!("pobieram… · treść z {}", godzina(t)), BLACK)
+        }
+        NetState::Fetching { since: None } => ("pobieram…".to_string(), BLACK),
     };
     // Status nie ma prawa wejść ani na blok z datą po lewej, ani na baterię nad sobą.
     // Przy 540 px szerokości jedno i drugie było o włos.

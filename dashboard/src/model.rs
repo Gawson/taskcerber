@@ -212,7 +212,9 @@ pub enum NetState {
     /// przez chwilę: rysujemy go PRZED podniesieniem radia i zastępujemy wynikiem,
     /// gdy radio zejdzie. Bez niego kilkanaście sekund pobierania wygląda z zewnątrz
     /// identycznie jak zawieszenie — i tak było zgłaszane ze sprzętu.
-    Fetching { since: NaiveDateTime },
+    /// `since` = kiedy pokazywana treść została pobrana. `None`, gdy nie wiadomo —
+    /// wtedy nie zmyślamy godziny, tylko jej nie pokazujemy.
+    Fetching { since: Option<NaiveDateTime> },
 }
 
 /// Kafelek z dowolną wartością z innego źródła (pogoda, kurs, cokolwiek).

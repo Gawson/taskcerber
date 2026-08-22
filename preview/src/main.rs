@@ -331,7 +331,7 @@ fn scenario_empty() -> Model {
 fn scenario_pobieram() -> Model {
     let mut m = scenario_full();
     m.net = NetState::Fetching {
-        since: dt(18, 6, 42),
+        since: Some(dt(18, 6, 42)),
     };
     m
 }

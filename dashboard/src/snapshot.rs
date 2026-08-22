@@ -39,7 +39,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use crate::model::{CalEvent, SourceTag};
 
 /// Numer wersji formatu. Bump przy KAŻDEJ zmianie układu bajtów.
-pub const WERSJA: u8 = 1;
+pub const WERSJA: u8 = 2;
 
 /// Górny limit długości tekstu w bajtach.
 ///
@@ -62,6 +62,13 @@ pub struct Snapshot {
     pub known: Option<(NaiveDate, NaiveDate)>,
     /// Zakres dni, o które pytał kanał świąt — osobno, bo ma inny horyzont.
     pub known_holidays: Option<(NaiveDate, NaiveDate)>,
+    /// Kiedy ta treść została pobrana. `None` = nie wiadomo.
+    ///
+    /// Znacznik mieszka W MIGAWCE, a nie w pamięci RTC, i to jest poprawka konkretnej
+    /// pomyłki: `RtcState` nie przeżywa resetu innego niż wybudzenie z deep sleepu,
+    /// więc po każdym restarcie przez USB pole zerowało się i ekran pokazywał „z 01:00",
+    /// czyli epokę. Wiek treści jest własnością treści, więc leży tam, gdzie ona.
+    pub saved_at: Option<NaiveDateTime>,
 }
 
 fn tag_na_bity(t: SourceTag) -> u8 {
@@ -129,6 +136,9 @@ fn dzien_na_sekundy(d: NaiveDate) -> i64 {
 pub fn encode(s: &Snapshot) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + s.events.len() * 80);
     out.push(WERSJA);
+
+    // Zero znaczy „nie wiadomo": prawdziwa data pobrania nie wypadnie w 1970 roku.
+    out.extend_from_slice(&s.saved_at.map(sekundy).unwrap_or(0).to_le_bytes());
 
     wpisz_zakres(&mut out, s.known);
     wpisz_zakres(&mut out, s.known_holidays);
@@ -207,6 +217,10 @@ pub fn decode(bytes: &[u8]) -> Option<Snapshot> {
         return None;
     }
 
+    let saved_at = match c.i64()? {
+        0 => None,
+        v => z_sekund(v),
+    };
     let known = c.zakres()?;
     let known_holidays = c.zakres()?;
 
@@ -242,6 +256,7 @@ pub fn decode(bytes: &[u8]) -> Option<Snapshot> {
         holidays,
         known,
         known_holidays,
+        saved_at,
     })
 }
 
@@ -308,6 +323,7 @@ mod tests {
                 NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                 NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
             )),
+            saved_at: Some(dt(18, 7)),
         }
     }
 
