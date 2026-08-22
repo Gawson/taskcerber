@@ -444,3 +444,27 @@ publikować obraz, trzymaj epdiy jako niemodyfikowany komponent z rejestru
 (tak jest teraz) i licz się z obowiązkiem udostępnienia źródeł.
 
 Krój: Noto Sans (SIL Open Font License 1.1), przycięty do Latin + Latin Extended-A.
+
+---
+
+## Wydanie i OTA
+
+Obraz powstaje i jest weryfikowany **lokalnie**, a publikacja nie kosztuje minut
+GitHub Actions:
+
+```bash
+./tools/build-image.sh     # buduje dist/ i sprawdza go check-image.sh
+./tools/publish.sh         # wypycha dist/ na gałąź gh-pages
+```
+
+Jednorazowo w ustawieniach repozytorium: **Settings → Pages → Source: Deploy from
+a branch → `gh-pages` / (root)**. Świadomie NIE „GitHub Actions" — tamten wariant
+wymagałby uruchomionego workflow.
+
+Urządzenie sięga po `ota.json` **samo**: adres jest wkompilowany jako
+`DEFAULT_OTA_URL`, więc nie trzeba go wpisywać na ekranowej klawiaturze. Wpis
+w konfiguracji nadpisuje go, gdy chcesz wydawać z własnego serwera.
+
+`gh-pages` jest gałęzią **wygenerowaną** — `publish.sh` buduje ją za każdym razem
+od zera z jednego commita i wypycha z `--force`. Inaczej każde wydanie dokładałoby
+do historii 3,1 MB obrazu, którego nikt nigdy nie odczyta.
