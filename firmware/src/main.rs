@@ -211,13 +211,6 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Zamiennik miernika: licznik kulombów BQ27220 uśredniony od linii bazowej.
     diag::energy_line(&mut state, power_status, fuel, net::time::now_unix());
 
-    // Konfiguracja ładowarki i licznika — pięć rejestrów, same odczyty. Na kablu przy
-    // każdym wybudzeniu, bo tylko wtedy ktoś czyta log, a zimny start na kablu zdarza
-    // się rzadko; na baterii zostaje przy zimnym starcie, żeby nie zaśmiecać.
-    if state.boot_count <= 1 || power_status.usb_present {
-        diag::hardware_config_report(&hw);
-    }
-
     let mut policy = Policy::default();
     if let Some(interval) = config.interval_s {
         policy.active_interval_s = interval as u64;
@@ -648,6 +641,11 @@ fn run(mut state: RtcState) -> Result<u64> {
         // przestałby budzić (brak `enable_wakeup`), a magistrala panelu poszłaby
         // w sen niezaizolowana — czyli karta pomiarowa kłamałaby o prądzie
         // spoczynkowym i o tym, czy urządzenie w ogóle da się obudzić.
+        // Stan ładowarki i licznika W CHWILI ZASYPIANIA — to jego dotyczy pytanie
+        // o prąd snu, a nie stanu sprzed dwudziestu sekund. Drukujemy tutaj także
+        // dlatego, że USB-CDC gubi wszystko sprzed ~500 ms od wybudzenia, czyli
+        // dokładnie ten fragment cyklu, w którym raport stał wcześniej.
+        diag::hardware_config_report(&hw);
         shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
         if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
             warn!("nie mogę włączyć budzenia: {e:#}");
@@ -784,6 +782,8 @@ fn run(mut state: RtcState) -> Result<u64> {
     state.last_known_unix = net::time::now_unix();
     state.store();
 
+    // Jak wyżej: stan tuż przed snem, już po enumeracji USB.
+    diag::hardware_config_report(&hw);
     shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
     if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
         warn!("nie mogę włączyć budzenia: {e:#}");
