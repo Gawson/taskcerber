@@ -111,17 +111,57 @@ impl Policy {
 
     /// Ile sekund spać po tym wybudzeniu.
     ///
-    /// W trybie nocnym śpimy jednym ciągiem do początku okna aktywnego, zamiast
-    /// budzić się co pół godziny po nic.
+    /// W trybie nocnym śpimy do początku okna aktywnego, zamiast budzić się co pół
+    /// godziny po nic — z jednym przystankiem o północy, żeby data na ekranie zdążyła
+    /// się zmienić. Patrz [`Self::seconds_until_midnight`].
     pub fn sleep_seconds(&self, mode: Mode, now: NaiveDateTime) -> u64 {
-        match mode {
+        let nominalny = match mode {
             Mode::Usb => self.usb_interval_s,
             Mode::Active => self.active_interval_s,
             Mode::Frugal => self.frugal_interval_s,
             Mode::Survival => self.survival_interval_s,
             Mode::Hold => 24 * 60 * 60,
             Mode::Night => self.seconds_until_morning(now),
+        };
+
+        // `Hold` broni ogniwa, które jest już prawie puste — jego doba snu jest
+        // ważniejsza niż poprawna data na szkle. Wszędzie indziej przycinamy sen
+        // do najbliższej północy.
+        if matches!(mode, Mode::Hold) {
+            return nominalny;
         }
+        nominalny.min(self.seconds_until_midnight(now))
+    }
+
+    /// Sekundy do najbliższej północy — a właściwie do 00:01.
+    ///
+    /// # Dlaczego to w ogóle istnieje
+    ///
+    /// Bo data na ekranie zmienia się o północy, a żaden inny mechanizm tego nie
+    /// zauważa: sumę kontrolną liczymy z treści kanału, a ta się o północy nie
+    /// zmienia. Bez tego przycięcia `Mode::Night` śpi jednym ciągiem do rana i między
+    /// północą a siódmą na szkle stoi ekran o nazwie „dzisiaj" z **wczorajszą** datą.
+    /// To samo dotyczy „dziś" i „jutro" w nagłówkach agendy.
+    ///
+    /// Koszt: jedno dodatkowe wybudzenie na dobę, czyli boot i jedna pełna klatka —
+    /// rzędu 42 mAs, poniżej dwóch dziesiątych procenta doby.
+    ///
+    /// # Dlaczego 00:01, a nie 00:00
+    ///
+    /// Zegar potrafi obudzić urządzenie ułamek sekundy za wcześnie, a wtedy `now`
+    /// jest jeszcze wczorajsze i cała operacja idzie na marne — z drugim wybudzeniem
+    /// sekundę później. Minuta zapasu nic nie kosztuje i zamyka tę klasę pomyłek.
+    fn seconds_until_midnight(&self, now: NaiveDateTime) -> u64 {
+        let cel = now
+            .date()
+            .succ_opt()
+            .map(|d| d.and_hms_opt(0, 1, 0).unwrap_or(d.and_time(self.day_start)));
+        let Some(cel) = cel else {
+            // Ostatni reprezentowalny dzień w kalendarzu — nie ma jutra, więc nie ma
+            // czego przycinać. Zdarzy się nigdy, ale `unwrap` tu nie jest potrzebny.
+            return u64::MAX;
+        };
+        (cel - now).num_seconds().max(60) as u64
     }
 
     fn seconds_until_morning(&self, now: NaiveDateTime) -> u64 {
@@ -327,15 +367,45 @@ mod tests {
         assert_eq!(p.mode(false, Some(80), at(22, 59)), Mode::Active);
     }
 
+    /// Noc śpi do rana, ale z PRZYSTANKIEM O PÓŁNOCY.
+    ///
+    /// Poprzednia wersja tego testu wymagała jednego ciągu i była zgodna z kodem,
+    /// tyle że oba były błędne: między północą a siódmą na szkle stał ekran „dzisiaj"
+    /// z wczorajszą datą, a w agendzie „dziś" wskazywało wczoraj.
     #[test]
-    fn noc_spi_do_rana_jednym_ciagiem() {
+    fn noc_budzi_sie_o_polnocy_a_potem_spi_do_rana() {
         let p = Policy::default();
-        // O 23:30 do 07:00 jest 7,5 h.
-        let s = p.sleep_seconds(Mode::Night, at(23, 30));
-        assert_eq!(s, 7 * 3600 + 30 * 60);
-        // O 02:00 do 07:00 jest 5 h.
-        let s = p.sleep_seconds(Mode::Night, at(2, 0));
-        assert_eq!(s, 5 * 3600);
+
+        // O 23:30 najbliższa granica to północ (a ściślej 00:01), czyli 31 minut.
+        assert_eq!(p.sleep_seconds(Mode::Night, at(23, 30)), 31 * 60);
+
+        // Po północy nic już nie stoi na drodze do rana: o 02:00 do 07:00 jest 5 h.
+        assert_eq!(p.sleep_seconds(Mode::Night, at(2, 0)), 5 * 3600);
+    }
+
+    /// Przycięcie do północy obowiązuje we WSZYSTKICH trybach poza `Hold` — data
+    /// na ekranie jest niepoprawna niezależnie od tego, ile zostało w ogniwie.
+    #[test]
+    fn polnoc_przycina_kazdy_tryb_procz_hold() {
+        let p = Policy::default();
+        // Godzinę przed północą żaden nominalny odstęp nie ma prawa jej przekroczyć.
+        for mode in [Mode::Usb, Mode::Active, Mode::Frugal, Mode::Survival] {
+            let s = p.sleep_seconds(mode, at(23, 0));
+            assert!(s <= 61 * 60, "{mode:?}: sen {s} s przeskakuje północ");
+        }
+        // `Hold` broni ogniwa, które jest prawie puste — jego doba jest ważniejsza.
+        assert_eq!(p.sleep_seconds(Mode::Hold, at(23, 0)), 24 * 3600);
+    }
+
+    /// Sen liczony tuż przed północą nie może wyjść zerowy ani ujemny — inaczej
+    /// urządzenie wpadłoby w pętlę natychmiastowych wybudzeń.
+    #[test]
+    fn tuz_przed_polnoca_sen_ma_minimum() {
+        let p = Policy::default();
+        for minuta in [58, 59] {
+            let s = p.sleep_seconds(Mode::Active, at(23, minuta));
+            assert!(s >= 60, "o 23:{minuta} sen wyszedł {s} s");
+        }
     }
 
     #[test]
