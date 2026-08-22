@@ -372,8 +372,29 @@ fn run(mut state: RtcState) -> Result<u64> {
     //
     // Kosztuje to jedno dodatkowe pełne odświeżenie (~1,4 s, ~0,06 mAh). Płacimy je
     // tylko wtedy, gdy naprawdę pójdziemy po sieć i gdy jest co pokazać.
+    //
+    // To zdanie było przez chwilę nieprawdą: warunek nie pytał o sieć, więc migawka
+    // szła na szkło przy KAŻDYM wybudzeniu — z napisem „pobieram…", także wtedy, gdy
+    // w tym cyklu po sieć nie szliśmy wcale. Drugie malowanie zaraz to prostowało,
+    // więc każde wybudzenie kosztowało DWA pełne odświeżenia zamiast jednego, a między
+    // nimi na ekranie stał komunikat o pobieraniu, którego nie było. Widać to wprost
+    // w logu: dwa razy „odświeżenie Full: 1400 ms" w jednym cyklu, w odstępie 1,6 s.
+    let radio_allowed = !RADIO_ONLY_ON_USB || power_status.usb_present;
+
+    // Liczone RAZ i używane dwa razy — do decyzji o wstępnym malowaniu i do samego
+    // pobrania. Dwie osobne kopie tego warunku rozjechałyby się przy pierwszej zmianie
+    // polityki, a objawem byłoby dokładnie to, co wyżej: migawka obiecująca pobranie,
+    // do którego nie dochodzi.
+    let pojdziemy_po_siec = !diagnoza
+        && config.is_provisioned()
+        && radio_allowed
+        && (requested
+            || (policy.should_fetch(mode)
+                && policy.fetch_is_due(mode, net::time::now_unix(), store.last_fetch_unix())
+                && !matches!(mode, Mode::Night)));
+
     if let (Some(epd), Some(m)) = (epd_early.as_mut(), migawka.as_ref()) {
-        if migawka_swieza && config.is_provisioned() {
+        if migawka_swieza && config.is_provisioned() && pojdziemy_po_siec {
             let mut wstepny = build_model(
                 now,
                 m.events.clone(),
@@ -400,10 +421,6 @@ fn run(mut state: RtcState) -> Result<u64> {
     let painted_crc = state.last_content_crc;
     let mut content_crc = state.last_content_crc;
     let mut fetched = false;
-
-    // Radio podnosimy dopiero wtedy, gdy naprawdę trzeba — i na czas bring-upu
-    // wyłącznie na kablu. Patrz [`RADIO_ONLY_ON_USB`].
-    let radio_allowed = !RADIO_ONLY_ON_USB || power_status.usb_present;
 
     // OTA sprawdzamy TYLKO na kablu albo na wyraźne życzenie.
     //
@@ -450,16 +467,14 @@ fn run(mut state: RtcState) -> Result<u64> {
     // pobraliśmy go przed chwilą — a to jest te kilkanaście sekund, w których panel
     // jeszcze nie istnieje i dotyku nikt nie czyta. Żądanie użytkownika
     // (`RefreshNow`) omija ten warunek celowo: „odśwież teraz" ma znaczyć teraz.
-    } else if requested
-        || (policy.should_fetch(mode)
-            // Świeżość liczymy z NVS, nie z RtcState: tamta ginie przy każdym
-            // resecie innym niż wybudzenie z deep sleepu, więc po restarcie
-            // z monitora ocena widziała „nigdy nie pobierano" i puszczała pobranie
-            // mimo minutowych danych. To ta sama pułapka, która ugryzła już licznik
-            // prób OTA i znacznik czasu migawki.
-            && policy.fetch_is_due(mode, net::time::now_unix(), store.last_fetch_unix())
-            && !matches!(mode, Mode::Night))
-    {
+    // Świeżość liczymy z NVS, nie z RtcState: tamta ginie przy każdym resecie innym
+    // niż wybudzenie z deep sleepu, więc po restarcie z monitora ocena widziała
+    // „nigdy nie pobierano" i puszczała pobranie mimo minutowych danych. To ta sama
+    // pułapka, która ugryzła już licznik prób OTA i znacznik czasu migawki.
+    //
+    // Sam warunek policzony jest wyżej, przy `pojdziemy_po_siec` — dokładnie po to,
+    // żeby wstępne malowanie migawki i faktyczne pobranie nie mogły się rozjechać.
+    } else if pojdziemy_po_siec {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
         // Ślad wymaga WŁASNEJ zgody. Sam fakt, że panel istnieje, nie znaczy, że
         // wolno na niego pisać w trakcie TLS-a — to była osobna, wcześniejsza awaria.
