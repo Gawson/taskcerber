@@ -420,6 +420,8 @@ fn draw_header(model: &Model, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen)
         NetState::Stale { since } => (format!("nieaktualne od {}", godzina(since)), BLACK),
         NetState::Offline => ("brak sieci".to_string(), BLACK),
         NetState::NeedsAuth => ("skonfiguruj urządzenie".to_string(), BLACK),
+        // Pełnym atramentem, bo to komunikat „poczekaj", a nie tło.
+        NetState::Fetching { since } => (format!("pobieram… (z {})", godzina(since)), BLACK),
     };
     // Status nie ma prawa wejść ani na blok z datą po lewej, ani na baterię nad sobą.
     // Przy 540 px szerokości jedno i drugie było o włos.

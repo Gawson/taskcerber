@@ -206,6 +206,13 @@ pub enum NetState {
     Offline,
     /// Źródło odrzuciło poświadczenia — wymagana interwencja użytkownika.
     NeedsAuth,
+    /// Treść pochodzi z migawki, a pobranie TRWA w tej chwili.
+    ///
+    /// Panel i radio nie mogą pracować naraz, więc ten stan jest widoczny tylko
+    /// przez chwilę: rysujemy go PRZED podniesieniem radia i zastępujemy wynikiem,
+    /// gdy radio zejdzie. Bez niego kilkanaście sekund pobierania wygląda z zewnątrz
+    /// identycznie jak zawieszenie — i tak było zgłaszane ze sprzętu.
+    Fetching { since: NaiveDateTime },
 }
 
 /// Kafelek z dowolną wartością z innego źródła (pogoda, kurs, cokolwiek).

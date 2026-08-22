@@ -67,6 +67,7 @@ fn main() {
             ("week", dash(scenario_week())),
             ("empty", dash(scenario_empty())),
             ("offline", dash(scenario_offline())),
+            ("pobieram", dash(scenario_pobieram())),
             ("full", dash(scenario_full())),
             ("full-page2", {
                 let mut m = scenario_full();
@@ -87,6 +88,7 @@ fn main() {
         ],
         "empty" => vec![("empty", dash(scenario_empty()))],
         "provisioning" => vec![("provisioning", dash(scenario_provisioning()))],
+        "pobieram" | "fetching" => vec![("pobieram", dash(scenario_pobieram()))],
         "offline" => vec![("offline", dash(scenario_offline()))],
         "full" => vec![("full", dash(scenario_full()))],
         "setup" => vec![
@@ -321,6 +323,16 @@ fn scenario_setup_adres() -> Setup {
 fn scenario_empty() -> Model {
     let mut m = base(dt(23, 9, 5));
     m.tiles = vec![Tile::new("pogoda", "17").with_unit("°C")];
+    m
+}
+
+/// Treść z migawki, a pobranie trwa. Widoczne przez kilkanaście sekund między
+/// wstaniem panelu a zejściem radia — patrz `NetState::Fetching`.
+fn scenario_pobieram() -> Model {
+    let mut m = scenario_full();
+    m.net = NetState::Fetching {
+        since: dt(18, 6, 42),
+    };
     m
 }
 

@@ -325,6 +325,38 @@ fn run(mut state: RtcState) -> Result<u64> {
         Some(m) if migawka_swieza => (m.events.clone(), m.known, m.known_holidays),
         _ => (Vec::new(), None, None),
     };
+
+    // Migawka na ekran ZANIM ruszy radio — to jest cała stawka `PANEL_BEFORE_NET`.
+    //
+    // Panel i radio nie mogą pracować naraz, więc „w tle" jest niewykonalne. Ale to,
+    // czego brakowało, to nie było tło — tylko fakt, że przez kilkanaście sekund
+    // pobierania na szkle stała stara klatka z kwadracikiem uśpienia, nieodróżnialna
+    // od zawieszenia. Teraz stoi tam AKTUALNA treść z migawki i napis „pobieram…".
+    //
+    // Kosztuje to jedno dodatkowe pełne odświeżenie (~1,4 s, ~0,06 mAh). Płacimy je
+    // tylko wtedy, gdy naprawdę pójdziemy po sieć i gdy jest co pokazać.
+    if let (Some(epd), Some(m)) = (epd_early.as_mut(), migawka.as_ref()) {
+        if migawka_swieza && config.is_provisioned() {
+            let mut wstepny = build_model(
+                now,
+                m.events.clone(),
+                fuel,
+                power_status.usb_present,
+                NetState::Fetching {
+                    since: unix_to_local(state.last_success_unix, home_tz).unwrap_or(now),
+                },
+                m.known,
+                m.known_holidays,
+            );
+            wstepny.view = dashboard::View::from_u8(state.view);
+            let (canvas, _) = render_frame(&wstepny, rotation);
+            match present(epd, &canvas, &mut state, temperature, Refresh::Full) {
+                Ok(()) => info!("migawka na ekranie, dopiero teraz podnoszę radio"),
+                Err(e) => warn!("nie mogę pokazać migawki: {e:#}"),
+            }
+        }
+    }
+
     // CRC treści, która JEST na szkle. Trzymamy je osobno, bo `record_success`
     // nadpisuje `state.last_content_crc` zaraz po udanym pobraniu — porównanie
     // z polem stanu byłoby wtedy porównaniem wartości z samą sobą.
@@ -1318,9 +1350,26 @@ const NET_TRACE_ON_PANEL: bool = false;
 /// rysowanie śladu ma własną zgodę powyżej, bo to była osobna awaria i mieszanie
 /// ich w jednym przełączniku było błędem, który już raz kosztował rundę na sprzęcie.
 ///
-/// Jeśli krok sieciowy przechodzi przy `true`, zakaz rysowania przed siecią jest
-/// nieaktualny — a wtedy da się narysować migawkę od razu po wybudzeniu i pokazać
-/// stan pobierania, zamiast kilkunastu sekund ciszy z kwadracikiem uśpienia.
+/// # WYNIK: zakaz był mój i był błędny
+///
+/// Sprawdzone na sprzęcie. Panel stał zainicjalizowany przez cały uścisk TLS
+/// i pobranie 1,18 MB, po czym cykl doszedł do końca:
+///
+/// ```text
+/// panel wstał PRZED siecią · wolny DRAM 173 KB (było 229 KB)
+/// krok5: radio gotowe · DRAM 99 KB
+/// kanał kalendarz główny: 1183976 B pobrane
+/// krok5: sparsowane
+/// ```
+///
+/// Przy okazji ZMIERZONY koszt epdiy: **56 KB** wewnętrznego DRAM-u, a nie „~30 KB",
+/// które podawałem. Prawie dwa razy więcej — i mimo to przy pobieraniu zostaje 98 KB,
+/// czyli grubo ponad to, czego mbedTLS potrzebuje.
+///
+/// Tamta awaria, na której oparłem zakaz, padała przy „pobieram kalendarz główny" —
+/// czyli tam, gdzie siedział błąd `CONFIG_MBEDTLS_DYNAMIC_BUFFER` na ścieżce TLS 1.3.
+/// Wyciągnąłem z niej wniosek o pamięci i cementowałem go w komentarzach jako prawo
+/// natury. Nie było nim.
 const PANEL_BEFORE_NET: bool = true;
 
 /// Czy urządzenie ma zostawiać kontroler dotyku przy życiu na czas snu, żeby
