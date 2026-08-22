@@ -207,6 +207,12 @@ pub enum Applied {
     Relayout,
     /// Użytkownik nacisnął „zapisz".
     Save,
+    /// Użytkownik nacisnął „wróć" — wychodzimy BEZ zapisywania.
+    ///
+    /// Osobno od [`Applied::Save`], bo to jest cała różnica: zapis przenosi wpisane
+    /// wartości do NVS, a wyjście je porzuca. Bez tego wariantu jedynym sposobem
+    /// opuszczenia konfiguracji było zatwierdzenie zmiany, której się nie chciało.
+    Cancel,
     /// Akcja nie należy do tego ekranu.
     Ignored,
 }
@@ -277,6 +283,10 @@ impl Setup {
         use crate::hit::Action;
 
         match action {
+            // „wróć" nie należy do klawiatury i nie zmienia żadnej wartości —
+            // przekazujemy decyzję wyżej, bo tylko wołający wie, co znaczy „wyjdź".
+            Action::Back => Applied::Cancel,
+
             Action::Key(ch) => {
                 let ch = if self.caps.is_active() {
                     // `to_uppercase` bywa wieloznakowe (nie dla polskich liter, ale

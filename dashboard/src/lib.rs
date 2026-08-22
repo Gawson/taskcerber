@@ -30,6 +30,7 @@ pub mod shapes;
 pub mod snapshot;
 pub mod testcard;
 pub mod text;
+pub mod today;
 pub mod year;
 
 pub use canvas::{

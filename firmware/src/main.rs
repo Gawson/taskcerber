@@ -2062,6 +2062,14 @@ fn setup_screen(
                     info!("konfiguracja zapisana: {saved}");
                     return saved;
                 }
+                Applied::Cancel => {
+                    // Wyjście bez zapisu. Zwracamy `false` dokładnie jak przy
+                    // wygaśnięciu okna — dla wołającego „nic nie zapisano" to jedna
+                    // sytuacja, niezależnie od tego, czy ktoś wyszedł, czy odszedł.
+                    epd.hold_power(false);
+                    info!("konfiguracja zamknięta bez zapisu");
+                    return false;
+                }
                 Applied::Relayout => {
                     // Inna strona klawiatury albo inne pole — zmienia się pół ekranu
                     // i mapa obszarów dotykowych. Mapę odświeżamy OD RAZU, w pamięci,

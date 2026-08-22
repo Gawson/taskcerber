@@ -13,6 +13,8 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 /// rysowanie paska, jak i testy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
+    /// Co trwa teraz i co następne — jeden dzień, hierarchia zamiast listy.
+    Today,
     /// Lista najbliższych wydarzeń — widok domyślny.
     #[default]
     Agenda,
@@ -23,7 +25,10 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Agenda, View::Month, View::Year];
+    /// Kolejność na pasku zakładek jest kolejnością POWIĘKSZANIA ZAKRESU:
+    /// jeden dzień, czternaście dni, miesiąc, rok. Ruch w prawo zawsze znaczy
+    /// „pokaż mi więcej czasu naraz", i nie trzeba tego pamiętać.
+    pub const ALL: [View; 4] = [View::Today, View::Agenda, View::Month, View::Year];
 
     /// Numer wariantu do zapisu poza pamięcią programu.
     ///
@@ -35,6 +40,7 @@ impl View {
             View::Agenda => 0,
             View::Month => 1,
             View::Year => 2,
+            View::Today => 3,
         }
     }
 
@@ -44,6 +50,7 @@ impl View {
         match v {
             1 => View::Month,
             2 => View::Year,
+            3 => View::Today,
             _ => View::Agenda,
         }
     }
@@ -51,6 +58,7 @@ impl View {
     /// Napis na zakładce. Krótki, bo segment ma 180 px w pionie.
     pub fn label(self) -> &'static str {
         match self {
+            View::Today => "dzisiaj",
             View::Agenda => "agenda",
             View::Month => "miesiąc",
             View::Year => "rok",

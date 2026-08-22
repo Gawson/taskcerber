@@ -228,5 +228,4 @@ pub fn hardware_config_report(hw: &Board) {
         Some(true) => info!("BQ27220: profil zgodny z ogniwem z tabliczki"),
         None => warn!("BQ27220: nie mogę odczytać DesignCapacity"),
     }
-
 }

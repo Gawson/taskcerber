@@ -192,6 +192,7 @@ const DAY_GAP: i32 = 14;
 /// i nie wie, że istnieje więcej niż jeden ekran; `preview` i symulator też.
 pub fn render(model: &Model, fonts: &Fonts, c: &mut Gray8) -> Screen {
     let mut screen = match model.view {
+        View::Today => crate::today::render_today(model, fonts, c),
         View::Agenda => render_agenda_screen(model, fonts, c),
         View::Month => crate::month::render_month(model, fonts, c),
         View::Year => crate::year::render_year(model, fonts, c),
@@ -1897,7 +1898,16 @@ fn draw_keyboard_filtered(
     };
 
     // Jednostki sumują się do 10, czyli dokładnie do szerokości wiersza klawiszy.
-    let bar: [(f32, &str, Action, KeyStyle); 5] = [
+    //
+    // „wróć" jest tu, bo bez niego z konfiguracji NIE DA SIĘ wyjść inaczej niż przez
+    // „zapisz" albo przez odczekanie dziewięćdziesięciu sekund — czyli albo zapisujesz
+    // zmianę, której nie chciałeś, albo stoisz przy ścianie i czekasz. Zgłoszona wada.
+    //
+    // Miejsce na niego bierzemy ze spacji (3,0 -> 2,0), a nie z „usuń" czy „zapisz":
+    // spacja jest najszerszym klawiszem paska i jedynym, w którym cel dotykowy ma
+    // wielokrotny zapas. Że wszystkie etykiety nadal się mieszczą bez skracania,
+    // pilnuje `etykiety_dolnego_paska_mieszcza_sie_w_klawiszach`.
+    let bar: [(f32, &str, Action, KeyStyle); 6] = [
         (1.5, "Aa", Action::Caps, caps_style),
         (
             1.5,
@@ -1905,8 +1915,9 @@ fn draw_keyboard_filtered(
             Action::KeyPage,
             KeyStyle::Normal,
         ),
-        (3.0, "spacja", Action::Key(' '), KeyStyle::Normal),
-        (2.0, "usuń", Action::Backspace, KeyStyle::Normal),
+        (2.0, "spacja", Action::Key(' '), KeyStyle::Normal),
+        (1.5, "usuń", Action::Backspace, KeyStyle::Normal),
+        (1.5, "wróć", Action::Back, KeyStyle::Normal),
         (2.0, "zapisz", Action::Save, save_style),
     ];
 
@@ -2362,6 +2373,60 @@ mod tests {
                 g.hint_base,
                 g.kb_top
             );
+        }
+    }
+
+    /// Z konfiguracji musi dać się WYJŚĆ bez zapisywania.
+    ///
+    /// Bez tego jedynymi drogami były „zapisz" — czyli zatwierdzenie zmiany, której
+    /// się nie chciało — i dziewięćdziesiąt sekund stania przy ścianie.
+    #[test]
+    fn z_konfiguracji_da_sie_wyjsc_bez_zapisu() {
+        let fonts = Fonts::embedded();
+        for rot in [Rotation::Portrait, Rotation::Landscape] {
+            let mut c = Gray8::new(rot);
+            let screen = render_setup(&Setup::new(), &fonts, &mut c);
+            let wyjscie = screen
+                .hits
+                .iter()
+                .find(|h| h.action == Action::Back)
+                .unwrap_or_else(|| panic!("{rot:?}: brak wyjścia z konfiguracji"));
+            assert!(
+                wyjscie.rect.w >= 44 && wyjscie.rect.h >= 44,
+                "{rot:?}: cel {}x{} poniżej progu palca",
+                wyjscie.rect.w,
+                wyjscie.rect.h
+            );
+        }
+    }
+
+    /// Etykiety dolnego paska muszą się mieścić BEZ skracania.
+    ///
+    /// `draw_key` skraca po cichu, więc złe proporcje nie wywalają układu — zamieniają
+    /// tylko „zapisz" w „zap…", co widać dopiero na szkle. Ten test jest jedynym
+    /// miejscem, w którym taka zmiana się zatrzyma.
+    #[test]
+    fn etykiety_dolnego_paska_mieszcza_sie_w_klawiszach() {
+        let fonts = Fonts::embedded();
+        for rot in [Rotation::Portrait, Rotation::Landscape] {
+            let mut c = Gray8::new(rot);
+            let setup = Setup::new();
+            let g = SetupGeom::of(&c, &setup);
+            for (units, label) in [
+                (1.5, "Aa"),
+                (1.5, setup.page().switch_label()),
+                (2.0, "spacja"),
+                (1.5, "usuń"),
+                (1.5, "wróć"),
+                (2.0, "zapisz"),
+            ] {
+                let dostepne = (g.span(units) - 8) as f32;
+                let potrzebne = fonts.measure(label, TEXT_BODY, Weight::Medium);
+                assert!(
+                    potrzebne <= dostepne,
+                    "{rot:?}: \"{label}\" potrzebuje {potrzebne:.0} px, klawisz daje {dostepne:.0}"
+                );
+            }
         }
     }
 

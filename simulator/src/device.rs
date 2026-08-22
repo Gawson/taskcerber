@@ -286,6 +286,13 @@ impl Device {
                     self.commit_setup();
                     return;
                 }
+                // Wyjście bez zapisu: porzucamy wpisane wartości i wracamy do agendy,
+                // dokładnie tak, jak robi to firmware.
+                Applied::Cancel => {
+                    self.setup = None;
+                    self.repaint();
+                    return;
+                }
                 // Akcje agendy w trakcie konfiguracji nie mają znaczenia — poza
                 // jedną, którą obsługujemy niżej.
                 Applied::Ignored => {}
