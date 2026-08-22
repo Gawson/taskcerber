@@ -134,6 +134,23 @@ fn main() {
         }
         Err(e) => {
             error!("cykl zakończony błędem: {e:#}");
+
+            // Bez tych dwóch wywołań urządzenie zasypiało na piętnaście minut GŁUCHE.
+            // Oba siedzą wewnątrz `run()`, więc każdy wcześniejszy błąd je omijał:
+            // maska `ext1` nigdy nie zostawała założona, a `BOOT_BTN` wracał
+            // z poprzedniego snu zatrzaśnięty i przemuxowany na RTC. Przycisk nie
+            // robił wtedy nic i z zewnątrz wyglądało to na zawieszenie — dokładnie
+            // ten objaw: „zmarł na łączeniu z wifi, wcisnąłem reset, nic".
+            //
+            // Dotyku tu świadomie NIE włączamy. Na ścieżce błędu nie wiadomo, czy
+            // GT911 dostał w tym cyklu sekwencję resetu; przy pływającym `T_INT`
+            // maska `ANY_LOW` wyzwoliłaby się natychmiast i zrobiła z piętnastu minut
+            // pętlę wybudzeń. Gwarantujemy jedno: BOOT działa zawsze.
+            shutdown::release_pin_holds();
+            if let Err(e) = shutdown::enable_wakeup(false) {
+                error!("nie mogę włączyć wybudzania po błędzie: {e:#}");
+            }
+
             // Nawet po błędzie musimy zasnąć — pętla resetów rozładuje ogniwo
             // szybciej niż cokolwiek innego.
             shutdown::deep_sleep_for(15 * 60);
@@ -526,7 +543,24 @@ fn run(mut state: RtcState) -> Result<u64> {
             }
         }
     } else {
-        info!("tryb {mode:?} nie sięga po sieć w tym cyklu");
+        // Trzy powody pominięcia sieci wyglądają w logu identycznie, a znaczą co
+        // innego. Najważniejszy jest ten ostatni: „dane są świeże" to jedyny powód,
+        // który oznacza, że mechanizm oszczędzania DZIAŁA — reszta to decyzje trybu.
+        // Bez rozróżnienia każde pominięcie czytało się jak ograniczenie polityki,
+        // także wtedy, gdy było dokładnie tym, o co nam chodziło.
+        let teraz = net::time::now_unix();
+        let ostatnie = store.last_fetch_unix();
+        if matches!(mode, Mode::Night) {
+            info!("noc — sieć śpi razem z urządzeniem");
+        } else if !policy.should_fetch(mode) {
+            info!("tryb {mode:?} nie sięga po sieć w tym cyklu");
+        } else {
+            info!(
+                "dane sprzed {} min są świeże (próg {} min) — pomijam pobranie",
+                (teraz - ostatnie).max(0) / 60,
+                policy.interval_s(mode) / 60
+            );
+        }
         if state.last_success_unix > 0 {
             net_state = NetState::Stale {
                 since: unix_to_local(state.last_success_unix, home_tz).unwrap_or(now),
