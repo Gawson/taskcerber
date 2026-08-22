@@ -18,6 +18,9 @@ const REG_VOLTAGE: u8 = 0x08; // mV
 const REG_CURRENT: u8 = 0x0C; // mA, ze znakiem
 const REG_REMAINING: u8 = 0x10; // mAh
 const REG_STATE_OF_CHARGE: u8 = 0x2C; // %
+const REG_FULL_CHARGE: u8 = 0x12; // mAh, pojemność NAUCZONA
+const REG_OPERATION_STATUS: u8 = 0x3A; // bity stanu, m.in. plomba
+const REG_DESIGN_CAPACITY: u8 = 0x3C; // mAh, pojemność Z PROFILU
 
 pub struct Bq27220 {
     dev: I2cDevice,
@@ -32,6 +35,33 @@ pub struct Fuel {
     pub temperature_c: Option<i16>,
     /// Pozostała pojemność w mAh — licznik kulombów, zamiennik miernika.
     pub remaining_mah: Option<u16>,
+}
+
+/// Konfiguracja licznika — czy zna ogniwo, którego pilnuje.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Provisioning {
+    /// `DesignCapacity` (0x3C) — pojemność z wgranego profilu.
+    pub design_mah: Option<u16>,
+    /// `FullChargeCapacity` (0x12) — pojemność nauczona z cykli.
+    pub full_charge_mah: Option<u16>,
+    /// `OperationStatus` (0x3A).
+    pub operation_status: Option<u16>,
+}
+
+impl Provisioning {
+    /// Pojemność z tabliczki ogniwa na tej płytce.
+    pub const NOMINALNA_MAH: u16 = 1500;
+
+    /// Czy licznik dostał profil pasujący do ogniwa.
+    ///
+    /// Tolerancja 5 % jest po to, żeby nie krzyczeć na profil wgrany z lekko inną
+    /// wartością — istotna jest różnica rzędu tych 1500 kontra 947, nie jednostki mAh.
+    pub fn zna_ogniwo(&self) -> Option<bool> {
+        self.design_mah.map(|d| {
+            let odchylka = d.abs_diff(Self::NOMINALNA_MAH);
+            odchylka * 20 <= Self::NOMINALNA_MAH
+        })
+    }
 }
 
 impl Bq27220 {
@@ -58,6 +88,34 @@ impl Bq27220 {
                 .ok()
                 .map(decikelvin_to_celsius),
             remaining_mah: self.dev.read_u16_le(REG_REMAINING).ok(),
+        }
+    }
+
+    /// Odczyt rozstrzygający, czy licznik w ogóle wie, jakie ogniwo obsługuje.
+    ///
+    /// # Po co osobno od [`Self::read`]
+    ///
+    /// Bo to nie są dane bieżące, tylko konfiguracja — czytamy je raz, w raporcie
+    /// zimnego startu, a nie przy każdym wybudzeniu.
+    ///
+    /// # Co te trzy liczby razem znaczą
+    ///
+    /// Ogniwo ma z tabliczki 1500 mAh, a licznik raportuje ~947. Firmware producenta
+    /// wgrywa profil CEDV z `DesignCapacity = 1500` przy **każdym** starcie
+    /// (`bq27220_data_memory.c:36`, wołane bezwarunkowo z `main.cpp:567`); my tylko
+    /// czytamy. Jeśli `design_mah` odbiega od 1500, licznik nigdy nie dostał profilu,
+    /// a `full_charge_mah` to nauczona pojemność przyduszona przez `FCC_LIM` pod
+    /// niesprowizjonowaną pojemnością projektową. Czyli: **kostka nie kłamie, tylko
+    /// nikt jej nie powiedział, co ma pod spodem.**
+    ///
+    /// Znaczenie jest praktyczne, nie kosmetyczne: progi trybów pracy (Frugal < 40 %,
+    /// Survival < 20 %, Hold < 10 %) liczą się z tego procentu, więc zaniżający licznik
+    /// potrafi odciąć dostęp do sieci przy realnie pełnej baterii.
+    pub fn provisioning(&self) -> Provisioning {
+        Provisioning {
+            design_mah: self.dev.read_u16_le(REG_DESIGN_CAPACITY).ok(),
+            full_charge_mah: self.dev.read_u16_le(REG_FULL_CHARGE).ok(),
+            operation_status: self.dev.read_u16_le(REG_OPERATION_STATUS).ok(),
         }
     }
 
