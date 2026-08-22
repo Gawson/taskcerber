@@ -56,13 +56,21 @@ impl Pca9535 {
 
     /// Gasi szynę LoRa/GPS. **Pierwsza rzecz po utworzeniu magistrali.**
     ///
-    /// Modyfikuje wyłącznie bit 0 — reszta portu 0 jest nieudokumentowana i nie wolno
-    /// jej ruszać.
+    /// Modyfikuje wyłącznie bit 0. Reszta portu 0 to fizycznie niepodłączone kikuty
+    /// (arkusz 3 schematu, piny 5–11 układu U1) — nie ma tam czego gasić ani psuć.
+    ///
+    /// # Kolejność zapisów jest istotna
+    ///
+    /// Rejestr wyjściowy PCA9535 wstaje po resecie wypełniony jedynkami. Ustawienie
+    /// najpierw KIERUNKU na wyjście wystawiało więc na `LORA_EN` stan wysoki i na czas
+    /// jednej transakcji I²C **załączało szynę, którą właśnie gasimy**. Najpierw stan,
+    /// potem kierunek: dopóki pin jest wejściem, zawartość rejestru wyjściowego niczego
+    /// nie steruje, więc zapis stanu jest całkowicie bezpieczny.
     pub fn power_down_lora_gps(&self) -> Result<()> {
-        // Bit 0 jako wyjście (0 = output w PCA95xx).
-        self.dev.update_u8(REG_CONFIG_0, BIT_LORA_EN, 0)?;
-        // Stan niski = LDO wyłączony.
+        // Stan niski = LDO wyłączony. Jeszcze jako wejście, więc nic nie steruje.
         self.dev.update_u8(REG_OUTPUT_0, BIT_LORA_EN, 0)?;
+        // Dopiero teraz bit 0 jako wyjście (0 = output w PCA95xx).
+        self.dev.update_u8(REG_CONFIG_0, BIT_LORA_EN, 0)?;
         Ok(())
     }
 
