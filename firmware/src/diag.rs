@@ -90,61 +90,6 @@ pub fn cold_boot_report(bus: &I2cBus, hw: &Board, boot_ms: u128) {
         Err(e) => warn!("PCA9535: brak odczytu: {e:#}"),
     }
 
-    // --- ładowarka: czy sami nie wystawiamy 5 V na gniazdo ------------------
-    // Pin OTG jest podciągnięty do VSYS przez R25 10K, więc boost BAT→VBUS blokuje
-    // wyłącznie bit OTG_CONFIG w REG03. Producent kasuje go przy każdym starcie, my
-    // tego rejestru nigdy nie dotknęliśmy — a pracujący podwyższalnik bez odbiornika
-    // jest jedyną znaną nam pozycją zdolną wyjaśnić rząd wielkości prądu snu.
-    match hw.charger.status() {
-        Ok(s) => {
-            if s.boost_running() {
-                warn!(
-                    "BQ25896: VBUS_STAT=0b{:03b} — kostka WYSTAWIA 5 V z ogniwa (OTG)",
-                    s.vbus_stat
-                );
-            } else {
-                info!(
-                    "BQ25896: VBUS_STAT=0b{:03b} CHRG_STAT=0b{:02b} USB={}",
-                    s.vbus_stat, s.chrg_stat, s.usb_present
-                );
-            }
-        }
-        Err(e) => warn!("BQ25896: brak odczytu stanu: {e:#}"),
-    }
-    match hw.charger.config() {
-        Ok(c) => {
-            info!(
-                "BQ25896: REG03={:#04X} (OTG_CONFIG={}) REG07={:#04X} (watchdog={})",
-                c.reg03,
-                c.otg_enabled() as u8,
-                c.reg07,
-                c.watchdog()
-            );
-            if c.otg_enabled() {
-                warn!("BQ25896: OTG_CONFIG załączony — to jest podejrzany numer jeden");
-            }
-        }
-        Err(e) => warn!("BQ25896: brak odczytu konfiguracji: {e:#}"),
-    }
-
-    // --- licznik ogniwa: czy w ogóle wie, co obsługuje ----------------------
-    let p = hw.fuel.provisioning();
-    info!(
-        "BQ27220: DesignCapacity={:?} mAh, FullCharge={:?} mAh, OperationStatus={:?}",
-        p.design_mah,
-        p.full_charge_mah,
-        p.operation_status.map(|v| format!("{v:#06X}"))
-    );
-    match p.zna_ogniwo() {
-        Some(false) => warn!(
-            "BQ27220: profil NIE odpowiada ogniwu {} mAh — procent naładowania jest \
-             zaniżony, a od niego zależą progi trybów pracy",
-            bq27220::Provisioning::NOMINALNA_MAH
-        ),
-        Some(true) => info!("BQ27220: profil zgodny z ogniwem z tabliczki"),
-        None => warn!("BQ27220: nie mogę odczytać DesignCapacity"),
-    }
-
     // --- PSRAM: epdiy alokuje przez assert(), więc zła konfiguracja to abort --
     match psram_size() {
         size if size == 8 * 1024 * 1024 => info!("PSRAM: {size} B — zgodnie z oczekiwaniem"),
@@ -216,4 +161,72 @@ pub fn energy_line(state: &mut RtcState, power: PowerStatus, fuel: Fuel, now_uni
 fn psram_size() -> usize {
     // SAFETY: prosty getter z ESP-IDF.
     unsafe { esp_idf_svc::sys::esp_psram_get_size() }
+}
+
+/// Konfiguracja ładowarki i licznika ogniwa — dwa pytania, na które nasz kod nigdy
+/// nie odpowiadał, a od których zależy otwarte dochodzenie w sprawie prądu snu.
+///
+/// # Dlaczego osobno od [`cold_boot_report`]
+///
+/// Tamten drukuje się wyłącznie przy zimnym starcie, a przy pracy z kablem zimny start
+/// zdarza się rzadko — i tak czy owak USB-CDC gubi pierwsze kilkaset milisekund wyjścia,
+/// zanim host zdąży się podpiąć. Odczyty trafiały więc w próżnię dokładnie wtedy, gdy
+/// były potrzebne. Pięć rejestrów kosztuje ułamek milisekundy, więc na kablu wołamy to
+/// przy każdym wybudzeniu; na baterii zostaje przy zimnym starcie.
+pub fn hardware_config_report(hw: &Board) {
+    // --- ładowarka: czy sami nie wystawiamy 5 V na gniazdo ------------------
+    // Pin OTG jest podciągnięty do VSYS przez R25 10K, więc boost BAT→VBUS blokuje
+    // wyłącznie bit OTG_CONFIG w REG03. Producent kasuje go przy każdym starcie, my
+    // tego rejestru nigdy nie dotknęliśmy — a pracujący podwyższalnik bez odbiornika
+    // jest jedyną znaną nam pozycją zdolną wyjaśnić rząd wielkości prądu snu.
+    match hw.charger.status() {
+        Ok(s) => {
+            if s.boost_running() {
+                warn!(
+                    "BQ25896: VBUS_STAT=0b{:03b} — kostka WYSTAWIA 5 V z ogniwa (OTG)",
+                    s.vbus_stat
+                );
+            } else {
+                info!(
+                    "BQ25896: VBUS_STAT=0b{:03b} CHRG_STAT=0b{:02b} USB={}",
+                    s.vbus_stat, s.chrg_stat, s.usb_present
+                );
+            }
+        }
+        Err(e) => warn!("BQ25896: brak odczytu stanu: {e:#}"),
+    }
+    match hw.charger.config() {
+        Ok(c) => {
+            info!(
+                "BQ25896: REG03={:#04X} (OTG_CONFIG={}) REG07={:#04X} (watchdog={})",
+                c.reg03,
+                c.otg_enabled() as u8,
+                c.reg07,
+                c.watchdog()
+            );
+            if c.otg_enabled() {
+                warn!("BQ25896: OTG_CONFIG załączony — to jest podejrzany numer jeden");
+            }
+        }
+        Err(e) => warn!("BQ25896: brak odczytu konfiguracji: {e:#}"),
+    }
+
+    // --- licznik ogniwa: czy w ogóle wie, co obsługuje ----------------------
+    let p = hw.fuel.provisioning();
+    info!(
+        "BQ27220: DesignCapacity={:?} mAh, FullCharge={:?} mAh, OperationStatus={:?}",
+        p.design_mah,
+        p.full_charge_mah,
+        p.operation_status.map(|v| format!("{v:#06X}"))
+    );
+    match p.zna_ogniwo() {
+        Some(false) => warn!(
+            "BQ27220: profil NIE odpowiada ogniwu {} mAh — procent naładowania jest \
+             zaniżony, a od niego zależą progi trybów pracy",
+            bq27220::Provisioning::NOMINALNA_MAH
+        ),
+        Some(true) => info!("BQ27220: profil zgodny z ogniwem z tabliczki"),
+        None => warn!("BQ27220: nie mogę odczytać DesignCapacity"),
+    }
+
 }

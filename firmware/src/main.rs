@@ -211,6 +211,13 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Zamiennik miernika: licznik kulombów BQ27220 uśredniony od linii bazowej.
     diag::energy_line(&mut state, power_status, fuel, net::time::now_unix());
 
+    // Konfiguracja ładowarki i licznika — pięć rejestrów, same odczyty. Na kablu przy
+    // każdym wybudzeniu, bo tylko wtedy ktoś czyta log, a zimny start na kablu zdarza
+    // się rzadko; na baterii zostaje przy zimnym starcie, żeby nie zaśmiecać.
+    if state.boot_count <= 1 || power_status.usb_present {
+        diag::hardware_config_report(&hw);
+    }
+
     let mut policy = Policy::default();
     if let Some(interval) = config.interval_s {
         policy.active_interval_s = interval as u64;
