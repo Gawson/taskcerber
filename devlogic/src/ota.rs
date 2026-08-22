@@ -169,9 +169,18 @@ pub fn decide(
 /// Gorszy wariant dotyczy obrazu: `firmware-ota.bin` nazywa się tak samo w każdym
 /// wydaniu, więc do NOWEGO manifestu mógłby przyjść STARY plik. Skończyłoby się to
 /// odrzuceniem na sumie kontrolnej — bezpiecznie, ale bez aktualizacji i bez wskazówki,
-/// dlaczego. Dlatego obraz dostaje znacznik WERSJI: jest deterministyczny, więc adres
-/// jest stały w obrębie wydania i CDN może go cache'ować do woli, a między wydaniami
-/// zawsze się różni.
+/// dlaczego.
+///
+/// # Dwa różne znaczniki, i to nie jest niekonsekwencja
+///
+/// * **Manifest dostaje znacznik CHWILI.** Zmienia się to, co leży na serwerze,
+///   a tego z góry nie znamy — więc adres musi być inny przy każdym pytaniu.
+///   Pierwsza wersja tej poprawki brała tu wersję działającą i była bezużyteczna:
+///   ta nie zmienia się, dopóki urządzenie się nie zaktualizuje, więc pytaliśmy
+///   wciąż o ten sam adres i wciąż dostawaliśmy tę samą odpowiedź z cache'u.
+/// * **Obraz dostaje znacznik WERSJI.** Tu tożsamość pliku jest znana z manifestu,
+///   więc adres ma być stały w obrębie wydania — cache robi wtedy swoją robotę —
+///   a różny między wydaniami.
 pub fn with_cache_buster(url: &str, znacznik: &str) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
     // Znacznik trafia do adresu, więc znaki spoza bezpiecznego zbioru zamieniamy —

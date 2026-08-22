@@ -52,6 +52,21 @@ use log::{info, warn};
 use crate::net::http;
 use crate::store::Store;
 
+/// Znacznik jednorazowy — inny przy każdym pytaniu o manifest.
+///
+/// Sekundy epoki, bo cykle dzieli co najmniej kilka minut. Gdy zegar jeszcze nie
+/// wie, która godzina (świeże urządzenie przed pierwszym SNTP), schodzimy na czas
+/// od startu układu — też jednorazowy, tylko w innej skali.
+fn znacznik_chwili() -> String {
+    let unix = crate::net::time::now_unix();
+    if unix > 0 {
+        return unix.to_string();
+    }
+    // SAFETY: prosty getter z ESP-IDF.
+    let us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+    format!("b{us}")
+}
+
 /// Kawałek strumienia zapisywany jednym `esp_ota_write`.
 const CHUNK: usize = 4096;
 
@@ -75,12 +90,20 @@ pub fn check_and_apply(
     running_version: &str,
     store: &mut Store,
 ) -> Result<Outcome> {
-    // Manifest MUSI ominąć cache pośredników — inaczej zaraz po wydaniu przychodzi
-    // stara kopia i urządzenie melduje „jestem aktualne", będąc o wydanie w tyle.
-    // Znacznikiem jest DZIAŁAJĄCA wersja: zmienia się dokładnie wtedy, gdy zmienia się
-    // to, o co pytamy, a przy niezmienionym firmwarze adres zostaje stały, więc CDN
-    // nie jest bombardowany bez potrzeby.
-    let url_manifestu = ota::with_cache_buster(manifest_url, running_version);
+    // Manifest MUSI ominąć cache pośredników, a znacznikiem jest CZAS — nie wersja.
+    //
+    // Pierwsza wersja tej poprawki brała wersję działającą i była bezużyteczna:
+    // ta nie zmienia się, dopóki urządzenie się nie zaktualizuje, więc pytaliśmy
+    // wciąż o ten sam adres, a CDN wciąż podawał tę samą odpowiedź. Zmienia się to,
+    // co leży NA SERWERZE, a tego z góry nie znamy — więc adres musi być inny przy
+    // każdym pytaniu.
+    //
+    // Bombardowania nie ma czym: manifest waży 162 bajty i pobieramy go najwyżej raz
+    // na cykl, a od niedawna tylko na kablu albo na żądanie.
+    //
+    // Dla OBRAZU jest odwrotnie i tam znacznikiem zostaje wersja: ona jest tożsamością
+    // pliku, o który prosimy, więc adres ma być stały w obrębie wydania.
+    let url_manifestu = ota::with_cache_buster(manifest_url, &znacznik_chwili());
     let manifest = fetch_manifest(&url_manifestu).context("nie mogę pobrać manifestu OTA")?;
     let mut attempts = store.ota_attempts();
 
