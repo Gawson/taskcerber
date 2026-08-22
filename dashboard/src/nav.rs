@@ -24,7 +24,7 @@
 //! ponad progiem palca (~44 px), i to celowo: pasek jest przy krawędzi, gdzie kciuk
 //! trafia najmniej dokładnie.
 
-use crate::canvas::{Gray8, Rect, BLACK, INK_DIM, WHITE};
+use crate::canvas::{Gray8, Rect, BLACK, WHITE};
 use crate::hit::{Action, HitRegion, Screen};
 use crate::layout::TEXT_LEAD;
 use crate::model::View;
@@ -69,7 +69,13 @@ pub fn draw_tabs(active: View, fonts: &Fonts, c: &mut Gray8, screen: &mut Screen
             // i tak by zniknął.
             let poprzedni_aktywny = View::ALL[(i - 1) as usize] == active;
             if !poprzedni_aktywny {
-                c.fill_rect(Rect::new(x, top + 12, 1, h - 24), INK_DIM);
+                // 3 px w czerni, nie 1 px w `INK_DIM`. Włos w półtonie łamie regułę
+                // „1–2 px nie istnieje na tym panelu" i przy okazji jest jedynym
+                // pikselem pasa, który po `quantize_ink_rect` siedzi na poziomie 1 —
+                // a tego poziomu MODE_DU nie rusza we wszystkich pięciu fazach.
+                // Przy czterech zakładkach separatorów jest więcej, więc pomyłka,
+                // która wcześniej była ledwo widoczna, byłaby teraz widoczna dobrze.
+                c.fill_rect(Rect::new(x, top + 16, 3, h - 32), BLACK);
             }
         }
 
