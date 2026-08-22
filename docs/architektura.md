@@ -738,8 +738,20 @@ zaskakująco dobra wiadomość — droga jest sieć i okno dotyku, nie wybudzeni
 | Powiadomienie z RTC (boot + Full) | 42 mAs | 0,15% |
 | Impuls podświetlenia 3 s (**niezmierzone**) | 60–180 mAs | 0,2–0,6% |
 | Bump `MAGIC` w `RtcState` (jednorazowo) | ~300 mAs | 1,1% |
-| Zmierzona doba całkowita | 27 720 mAs | 100% |
+| Suma powyższych pozycji (**model, nie pomiar**) | 27 720 mAs | 100% |
 | Ogniwo użyteczne (1200 mAh) | 4 320 000 mAs | 155 dób |
+
+> **Ta tabela nie zgadza się z rzeczywistością i to jest jej najważniejsza informacja.**
+> Suma modelu daje 7,7 mAh na dobę, czyli średnio **0,32 mA**. Obserwacja na sprzęcie to
+> **16–30 mA**, czyli pięćdziesiąt do stu razy więcej — przy takim prądzie doba wynosiłaby
+> 1,4–2,6 Ah, a więc więcej niż całe ogniwo. Producent zmierzył na tej samej płytce
+> **873 µA** (`vendor/README.md:171`, Victor 8246A), co jest jedyną liczbą z miernika,
+> jaką ktokolwiek ma dla tego sprzętu.
+>
+> Model opisuje więc koszt tego, co robimy świadomie, i w tej roli jest użyteczny.
+> Nie opisuje natomiast prądu spoczynkowego — a to on decyduje o tygodniu pracy.
+> Dopóki nie wiemy, co pobiera te kilkanaście miliamperów, **żadna pozycja poniżej nie
+> jest dźwignią**: wszystkie razem toną w tle, którego nie rozumiemy.
 
 Wniosek, który trzeba trzymać przy każdej decyzji projektowej: **dobór Full/Fast/Patch
 nie jest decyzją energetyczną.** Jedna klatka to 1/138 do 1/620 kosztu okna, w którym
