@@ -499,16 +499,53 @@ fn draw_battery(b: &Battery, fonts: &Fonts, c: &mut Gray8, x: i32, y: i32) {
     }
 
     if b.charging {
-        let cx = x + 28;
-        let cy = y + 13;
-        for i in 0..10 {
-            c.set(cx + 3 - i / 3, cy - 8 + i, BLACK);
-            c.set(cx + 2 - i / 3, cy - 8 + i, BLACK);
+        draw_bolt(c, x + 22, y + 4);
+    }
+}
+
+/// Błyskawica ładowania: wypełniona bryła z białą otoczką.
+///
+/// # Dlaczego nie kreski
+///
+/// Poprzednia wersja składała ją z pojedynczych pikseli — dwie ukośne kreski po
+/// **2 px szerokości**. Na 234 DPI kreska 2 px nie jest kształtem, tylko paprochem,
+/// i dokładnie tak została zgłoszona ze sprzętu. To ta sama zasada, przez którą
+/// paski gęstości w widoku miesięcznym mają 3 px pełnego atramentu zamiast kropek.
+///
+/// # Dlaczego otoczka
+///
+/// Błyskawica leży NA WYPEŁNIENIU baterii, którego ton zależy od stanu naładowania
+/// ([`FILL_DARK`], a poniżej 15% [`BLACK`]) — więc czarny kształt na czarnym tle
+/// znika. Biała otoczka o grubości 1 px odcina go od każdego tła, tak samo jak
+/// biała podkładka pod numerem dnia w `crate::month`.
+fn draw_bolt(c: &mut Gray8, x: i32, y: i32) {
+    // Wiersz po wierszu: górny klin schodzi w dół-lewo, dolny jest wobec niego
+    // przesunięty w prawo i schodzi tak samo. To przesunięcie JEST błyskawicą —
+    // bez niego wychodzi zwykły ukośny pasek.
+    const H: i32 = 18;
+    let biegi: [(i32, i32); H as usize] = {
+        let mut t = [(0, 0); H as usize];
+        let mut i = 0;
+        while i < H as usize {
+            let dy = i as i32;
+            t[i] = if dy < 9 {
+                // Górny klin: lewa krawędź pełznie w lewo, szerokość stała.
+                (7 - dy * 5 / 9, 5)
+            } else {
+                // Dolny klin zaczyna się o 3 px w prawo od końca górnego.
+                (8 - (dy - 9) * 5 / 9, 5)
+            };
+            i += 1;
         }
-        for i in 0..10 {
-            c.set(cx - 1 + i / 3, cy + i - 1, BLACK);
-            c.set(cx - 2 + i / 3, cy + i - 1, BLACK);
-        }
+        t
+    };
+
+    // Najpierw otoczka: ten sam kształt rozdmuchany o piksel w każdą stronę.
+    for (dy, (bx, bw)) in biegi.iter().enumerate() {
+        c.fill_rect(Rect::new(x + bx - 1, y + dy as i32 - 1, bw + 2, 3), WHITE);
+    }
+    for (dy, (bx, bw)) in biegi.iter().enumerate() {
+        c.fill_rect(Rect::new(x + bx, y + dy as i32, *bw, 1), BLACK);
     }
 }
 
@@ -2658,5 +2695,57 @@ mod tests {
             .filter(|h| h.action == Action::Focus(Field::Ota))
             .count();
         assert_eq!(wejscia, 1, "w poziomie ma zostać sama zakładka");
+    }
+    /// Błyskawica ładowania musi być BRYŁĄ, nie zadrapaniem.
+    ///
+    /// Poprzednia wersja składała ją z kresek 2 px i została zgłoszona ze sprzętu
+    /// jako „paproch". Test pilnuje dwóch rzeczy naraz: że w ogóle coś przybywa
+    /// przy ładowaniu, i że najszerszy ciągły bieg czerni ma co najmniej 4 px —
+    /// czyli że nikt nie wrócił do rysowania pojedynczymi pikselami.
+    #[test]
+    fn blyskawica_ladowania_jest_bryla_a_nie_kreska() {
+        let fonts = Fonts::embedded();
+        let now = NaiveDate::from_ymd_opt(2026, 8, 22)
+            .unwrap()
+            .and_hms_opt(14, 0, 0)
+            .unwrap();
+
+        let render_z = |charging: bool| {
+            let mut m = Model::empty(now);
+            m.battery = Battery {
+                percent: Some(78),
+                millivolts: Some(4100),
+                charging,
+            };
+            let mut c = Gray8::new(Rotation::Portrait);
+            render(&m, &fonts, &mut c);
+            c
+        };
+
+        let bez = render_z(false);
+        let z = render_z(true);
+        assert_ne!(
+            bez.pixels(),
+            z.pixels(),
+            "ładowanie musi być w ogóle widoczne"
+        );
+
+        // Najszerszy ciągły bieg czerni w obszarze wskaźnika, wiersz po wierszu.
+        let mut najszerszy = 0;
+        for y in 0..z.height() as i32 {
+            let mut biez = 0;
+            for x in 0..z.width() as i32 {
+                if z.get(x, y) == BLACK && bez.get(x, y) != BLACK {
+                    biez += 1;
+                    najszerszy = najszerszy.max(biez);
+                } else {
+                    biez = 0;
+                }
+            }
+        }
+        assert!(
+            najszerszy >= 4,
+            "najszerszy bieg czerni to {najszerszy} px — na 234 DPI to paproch, nie kształt"
+        );
     }
 }
