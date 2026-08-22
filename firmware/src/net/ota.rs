@@ -75,7 +75,13 @@ pub fn check_and_apply(
     running_version: &str,
     store: &mut Store,
 ) -> Result<Outcome> {
-    let manifest = fetch_manifest(manifest_url).context("nie mogę pobrać manifestu OTA")?;
+    // Manifest MUSI ominąć cache pośredników — inaczej zaraz po wydaniu przychodzi
+    // stara kopia i urządzenie melduje „jestem aktualne", będąc o wydanie w tyle.
+    // Znacznikiem jest DZIAŁAJĄCA wersja: zmienia się dokładnie wtedy, gdy zmienia się
+    // to, o co pytamy, a przy niezmienionym firmwarze adres zostaje stały, więc CDN
+    // nie jest bombardowany bez potrzeby.
+    let url_manifestu = ota::with_cache_buster(manifest_url, running_version);
+    let manifest = fetch_manifest(&url_manifestu).context("nie mogę pobrać manifestu OTA")?;
     let mut attempts = store.ota_attempts();
 
     let plan = match ota::decide(&manifest, manifest_url, running_version, &attempts) {
@@ -160,7 +166,11 @@ fn fetch_manifest(url: &str) -> Result<ota::Manifest> {
 /// startowy przestawiamy **po** weryfikacji — do tego momentu wgrany obraz jest
 /// martwy i nieszkodliwy.
 fn download_into_slot(plan: &Plan) -> Result<usize> {
-    let mut reader = http::get(&plan.image_url).context("nie mogę pobrać obrazu")?;
+    // Obraz też idzie ze znacznikiem, bo `firmware-ota.bin` nazywa się tak samo
+    // w każdym wydaniu. Znacznikiem jest wersja Z MANIFESTU: adres jest wtedy stały
+    // w obrębie wydania (cache działa, jak ma działać) i różny między wydaniami.
+    let url_obrazu = ota::with_cache_buster(&plan.image_url, &plan.version);
+    let mut reader = http::get(&url_obrazu).context("nie mogę pobrać obrazu")?;
 
     let mut esp_ota = EspOta::new().context("nie mogę otworzyć OTA")?;
 

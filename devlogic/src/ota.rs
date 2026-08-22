@@ -158,6 +158,37 @@ pub fn decide(
     })
 }
 
+/// Dokleja do adresu parametr zapytania, który omija pamięć podręczną pośredników.
+///
+/// # Dlaczego to jest konieczne, a nie ostrożnościowe
+///
+/// GitHub Pages serwuje przez CDN z `Cache-Control` rzędu dziesięciu minut. Zaraz po
+/// wydaniu urządzenie dostawało więc **stary manifest** i najzupełniej słusznie
+/// stwierdzało, że jest aktualne — zaobserwowane na sprzęcie.
+///
+/// Gorszy wariant dotyczy obrazu: `firmware-ota.bin` nazywa się tak samo w każdym
+/// wydaniu, więc do NOWEGO manifestu mógłby przyjść STARY plik. Skończyłoby się to
+/// odrzuceniem na sumie kontrolnej — bezpiecznie, ale bez aktualizacji i bez wskazówki,
+/// dlaczego. Dlatego obraz dostaje znacznik WERSJI: jest deterministyczny, więc adres
+/// jest stały w obrębie wydania i CDN może go cache'ować do woli, a między wydaniami
+/// zawsze się różni.
+pub fn with_cache_buster(url: &str, znacznik: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    // Znacznik trafia do adresu, więc znaki spoza bezpiecznego zbioru zamieniamy —
+    // wersja zawiera `+`, który w zapytaniu znaczy spację.
+    let bezpieczny: String = znacznik
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{url}{sep}v={bezpieczny}")
+}
+
 /// Rozwiązuje adres obrazu względem adresu manifestu.
 ///
 /// Adres bezwzględny zostaje bez zmian. Względny doklejamy do katalogu manifestu —
@@ -213,6 +244,42 @@ pub fn parse_manifest(body: &[u8]) -> Result<Manifest, String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Bez tego urządzenie dostaje z CDN-u stary manifest i melduje „jestem aktualne",
+    /// będąc o wydanie w tyle. Zaobserwowane na sprzęcie na GitHub Pages.
+    #[test]
+    fn znacznik_omijajacy_cache_dokleja_sie_poprawnie() {
+        assert_eq!(
+            with_cache_buster("https://x.test/ota.json", "0.1.0+gabc1234"),
+            "https://x.test/ota.json?v=0.1.0_gabc1234"
+        );
+        // Adres z własnym zapytaniem dostaje `&`, nie drugie `?`.
+        assert_eq!(
+            with_cache_buster("https://x.test/ota.json?a=1", "1.0"),
+            "https://x.test/ota.json?a=1&v=1.0"
+        );
+    }
+
+    /// Znacznik musi być DETERMINISTYCZNY, a nie oparty na czasie: adres stały
+    /// w obrębie wydania pozwala CDN-owi robić swoją robotę, a różny między
+    /// wydaniami wymusza świeży pobór dokładnie wtedy, gdy trzeba.
+    #[test]
+    fn ten_sam_znacznik_daje_ten_sam_adres() {
+        let a = with_cache_buster("https://x.test/f.bin", "0.1.0+gaaa1111");
+        let b = with_cache_buster("https://x.test/f.bin", "0.1.0+gaaa1111");
+        let c = with_cache_buster("https://x.test/f.bin", "0.1.0+gbbb2222");
+        assert_eq!(a, b, "ta sama wersja to ten sam adres");
+        assert_ne!(a, c, "inna wersja to inny adres");
+    }
+
+    /// Znaki spoza bezpiecznego zbioru nie mogą trafić do adresu surowe —
+    /// `+` w zapytaniu znaczy spację.
+    #[test]
+    fn znacznik_nie_przemyca_plusa_do_zapytania() {
+        let u = with_cache_buster("https://x.test/f.bin", "0.1.0+g1a2b3c4.d5e6f7");
+        assert!(!u.contains('+'), "plus musi zniknąć: {u}");
+        assert!(u.ends_with("v=0.1.0_g1a2b3c4.d5e6f7"), "{u}");
+    }
     use super::*;
 
     fn manifest(version: &str) -> Manifest {
