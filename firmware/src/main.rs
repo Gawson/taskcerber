@@ -424,7 +424,12 @@ fn run(mut state: RtcState) -> Result<u64> {
     // (`RefreshNow`) omija ten warunek celowo: „odśwież teraz" ma znaczyć teraz.
     } else if requested
         || (policy.should_fetch(mode)
-            && policy.fetch_is_due(mode, net::time::now_unix(), state.last_success_unix)
+            // Świeżość liczymy z NVS, nie z RtcState: tamta ginie przy każdym
+            // resecie innym niż wybudzenie z deep sleepu, więc po restarcie
+            // z monitora ocena widziała „nigdy nie pobierano" i puszczała pobranie
+            // mimo minutowych danych. To ta sama pułapka, która ugryzła już licznik
+            // prób OTA i znacznik czasu migawki.
+            && policy.fetch_is_due(mode, net::time::now_unix(), store.last_fetch_unix())
             && !matches!(mode, Mode::Night))
     {
         // Ślad na panelu tylko na kablu — patrz [`NetTrace`].
@@ -494,6 +499,7 @@ fn run(mut state: RtcState) -> Result<u64> {
                     store.save_snapshot(&snap, content_crc, state.last_content_crc);
                 }
 
+                store.set_last_fetch_unix(net::time::now_unix());
                 state.record_success(net::time::now_unix(), content_crc);
             }
             Err(e) => {

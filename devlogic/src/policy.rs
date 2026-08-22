@@ -55,6 +55,10 @@ pub struct Policy {
     /// wymusić dotknięciem „odśwież".
     pub active_interval_s: u64,
     /// Co ile sekund w trybie [`Mode::Usb`].
+    ///
+    /// Pół godziny, nie pięć minut. Na kablu energia nie boli, ale pobranie to i tak
+    /// 1,18 MB i ~10 s radia — a kalendarz nie zmienia się częściej. Krótki odstęp
+    /// dawał tylko złudzenie, że urządzenie „ciągle coś robi".
     pub usb_interval_s: u64,
     /// Co ile sekund w trybie [`Mode::Frugal`].
     pub frugal_interval_s: u64,
@@ -68,7 +72,7 @@ impl Default for Policy {
             day_start: NaiveTime::from_hms_opt(7, 0, 0).unwrap(),
             day_end: NaiveTime::from_hms_opt(23, 0, 0).unwrap(),
             active_interval_s: 60 * 60,
-            usb_interval_s: 5 * 60,
+            usb_interval_s: 30 * 60,
             frugal_interval_s: 60 * 60,
             survival_interval_s: 6 * 60 * 60,
         }

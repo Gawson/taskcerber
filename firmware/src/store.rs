@@ -47,6 +47,11 @@ const KEY_SNAPSHOT: &str = "cal_snap";
 // zużycie flasha jest bez znaczenia.
 const KEY_SNTP: &str = "sntp_unix";
 
+// Czas ostatniego UDANEGO pobrania. W NVS, a nie tylko w RtcState, bo tamta ginie
+// przy każdym resecie innym niż wybudzenie z deep sleepu — a wtedy ocena świeżości
+// widzi „nigdy nie pobierano" i puszcza pobranie, choć dane mają minutę.
+const KEY_FETCH: &str = "fetch_unix";
+
 const KEY_OTA_TRY_VER: &str = "ota_try_ver";
 const KEY_OTA_TRY_N: &str = "ota_try_n";
 
@@ -248,6 +253,25 @@ impl Store {
         }
         if let Err(e) = self.nvs.set_u64(KEY_SNTP, unix as u64) {
             log::warn!("nie mogę zapisać czasu synchronizacji: {e}");
+        }
+    }
+
+    /// Czas ostatniego udanego pobrania (unix). 0 = nigdy.
+    pub fn last_fetch_unix(&self) -> i64 {
+        self.nvs
+            .get_u64(KEY_FETCH)
+            .ok()
+            .flatten()
+            .map(|v| v as i64)
+            .unwrap_or(0)
+    }
+
+    pub fn set_last_fetch_unix(&mut self, unix: i64) {
+        if unix <= 0 {
+            return;
+        }
+        if let Err(e) = self.nvs.set_u64(KEY_FETCH, unix as u64) {
+            log::warn!("nie mogę zapisać czasu pobrania: {e}");
         }
     }
 
