@@ -330,7 +330,11 @@ pub fn enable_wakeup(keep_touch_alive: bool) -> Result<()> {
             sys::rtc_gpio_pulldown_dis(TOUCH_INT);
             sys::rtc_gpio_pullup_en(TOUCH_INT);
 
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            // 60 ms, nie 2. Tyle GT911 potrzebuje po zwolnieniu resetu, żeby objąć
+            // `INT` we własne władanie (`gt911::reset_sequence` czeka dokładnie tyle) —
+            // przy krótszej próbce strażnik mierzył jeszcze nasze podciągnięcie, a nie
+            // to, co robi kontroler.
+            std::thread::sleep(std::time::Duration::from_millis(60));
             sys::rtc_gpio_get_level(TOUCH_INT) != 0
         };
         if idle_high {

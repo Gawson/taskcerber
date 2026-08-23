@@ -164,6 +164,22 @@ fn run(mut state: RtcState) -> Result<u64> {
     let wakeup = shutdown::wakeup_source();
     info!("wybudzenie: {wakeup:?}");
 
+    // Ile trwał poprzedni sen — liczone ZANIM cokolwiek nadpisze `last_known_unix`.
+    //
+    // To jest wskaźnik mocniejszy od samego licznika wybudzeń, bo nie wymaga
+    // pamiętania, ile wybudzeń „powinno" być: przy godzinnym odstępie ma tu wyjść
+    // około 3600. Wartość rzędu kilkudziesięciu sekund znaczy, że urządzenie
+    // budzi się natychmiast po zaśnięciu — czyli burzę wybudzeń, a nie wysoką
+    // podłogę prądu snu. Zero znaczy zimny start albo brak wiarygodnego zegara.
+    let poprzedni_sen_s = {
+        let teraz = net::time::now_unix();
+        if teraz > 0 && state.last_known_unix > 0 && teraz > state.last_known_unix {
+            (teraz - state.last_known_unix) as u64
+        } else {
+            0
+        }
+    };
+
     let peripherals = Peripherals::take().context("nie mogę przejąć peryferiów")?;
     let sysloop = EspSystemEventLoop::take().context("nie mogę przejąć pętli zdarzeń")?;
     let nvs_partition = EspDefaultNvsPartition::take().context("nie mogę przejąć partycji NVS")?;
@@ -293,6 +309,20 @@ fn run(mut state: RtcState) -> Result<u64> {
         board::gt911::open(&bus, boot_count <= 1)
             .and_then(|touch| TouchReader::spawn(touch).map_err(|e| warn!("{e:#}")).ok())
     } else {
+        // Cykl bez okna dotyku też musi OTWORZYĆ kontroler, jeśli dotyk ma budzić ze
+        // snu — i to nie po to, żeby czytać dotknięcia, tylko żeby odtworzyć tryb
+        // zgłaszania przerwania.
+        //
+        // `reset_sequence` przy każdym wybudzeniu przywraca konfigurację z pamięci
+        // trwałej kontrolera, a my celowo do niej nie piszemy (patrz `gt911`). Bez
+        // tego wywołania rejestr 0x804D wracałby do wartości fabrycznej na każdym
+        // cyklu timerowym i `T_INT` nigdy by nie zszedł w dół — czyli wybudzanie
+        // dotykiem działałoby wyłącznie po cyklu, w którym akurat otworzyło się okno.
+        //
+        // Kosztuje dwie transakcje I²C i jedną sekwencję resetu, ~90 ms.
+        if WAKE_ON_TOUCH {
+            board::gt911::open(&bus, false);
+        }
         None
     };
 
@@ -644,7 +674,12 @@ fn run(mut state: RtcState) -> Result<u64> {
         // o prąd snu, a nie stanu sprzed dwudziestu sekund. Drukujemy tutaj także
         // dlatego, że USB-CDC gubi wszystko sprzed ~500 ms od wybudzenia, czyli
         // dokładnie ten fragment cyklu, w którym raport stał wcześniej.
-        diag::hardware_config_report(&hw, state.boot_count, &format!("{wakeup:?}"));
+        diag::hardware_config_report(
+            &hw,
+            state.boot_count,
+            &format!("{wakeup:?}"),
+            poprzedni_sen_s,
+        );
         shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
         if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
             warn!("nie mogę włączyć budzenia: {e:#}");
@@ -788,7 +823,12 @@ fn run(mut state: RtcState) -> Result<u64> {
     state.store();
 
     // Jak wyżej: stan tuż przed snem, już po enumeracji USB.
-    diag::hardware_config_report(&hw, state.boot_count, &format!("{wakeup:?}"));
+    diag::hardware_config_report(
+        &hw,
+        state.boot_count,
+        &format!("{wakeup:?}"),
+        poprzedni_sen_s,
+    );
     shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
     if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
         warn!("nie mogę włączyć budzenia: {e:#}");

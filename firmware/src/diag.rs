@@ -173,7 +173,7 @@ fn psram_size() -> usize {
 /// zanim host zdąży się podpiąć. Odczyty trafiały więc w próżnię dokładnie wtedy, gdy
 /// były potrzebne. Pięć rejestrów kosztuje ułamek milisekundy, więc na kablu wołamy to
 /// przy każdym wybudzeniu; na baterii zostaje przy zimnym starcie.
-pub fn hardware_config_report(hw: &Board, boot_count: u32, wakeup: &str) {
+pub fn hardware_config_report(hw: &Board, boot_count: u32, wakeup: &str, poprzedni_sen_s: u64) {
     // --- ile razy urządzenie wstało i od czego -----------------------------
     //
     // Ta linia jest tu, a nie przy starcie cyklu, z jednego twardego powodu:
@@ -186,7 +186,16 @@ pub fn hardware_config_report(hw: &Board, boot_count: u32, wakeup: &str) {
     // programowego ani wgrania obrazu. Po dobie na baterii przy godzinnym śnie
     // powinien wynosić około dwudziestu. Kilkaset albo kilka tysięcy znaczy burzę
     // wybudzeń — i to jest jedyna liczba, która odróżnia ją od wysokiej podłogi snu.
-    info!("licznik: boot #{boot_count}, to wybudzenie: {wakeup}");
+    // Długość poprzedniego snu rozstrzyga sprawę mocniej niż sam licznik: nie trzeba
+    // pamiętać, ile wybudzeń „powinno" być na dobę. Przy godzinnym odstępie wychodzi
+    // tu ~3600. Kilkadziesiąt sekund = urządzenie budzi się natychmiast po zaśnięciu.
+    match poprzedni_sen_s {
+        0 => info!("licznik: boot #{boot_count}, wybudzenie: {wakeup}, poprzedni sen: nieznany"),
+        s => info!(
+            "licznik: boot #{boot_count}, wybudzenie: {wakeup}, poprzedni sen: {s} s ({:.1} min)",
+            s as f32 / 60.0
+        ),
+    }
 
     // --- ładowarka: czy sami nie wystawiamy 5 V na gniazdo ------------------
     // Pin OTG jest podciągnięty do VSYS przez R25 10K, więc boost BAT→VBUS blokuje
