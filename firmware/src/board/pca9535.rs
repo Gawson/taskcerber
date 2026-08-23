@@ -6,9 +6,16 @@
 //! a `lilygo_board_s3` ustawia `.gpio_write = NULL`, więc nie ma nawet API.
 //!
 //! **A na porcie 0, bit 0, siedzi `LORA_EN`** — zasilanie wspólnej szyny LoRa + GPS.
-//! Rezystor `R21` (10 kΩ) podciąga `EN` tego LDO do VSYS, więc **szyna wstaje ZAŁĄCZONA
-//! po zimnym starcie** i kosztuje 25–35 mA. To jest 40 godzin baterii. Dlatego pierwszą
-//! transakcją I²C każdego bootu jest zgaszenie tego bitu.
+//! Rezystor `R21` (10 kΩ) jest **szeregowy** między tym bitem a wejściem `EN` układu U7,
+//! a na samym `EN` nie ma ani podciągnięcia, ani ściągnięcia — stan po zimnym starcie
+//! jest więc **nieokreślony**, a nie „załączony", jak twierdziła wcześniejsza wersja tego
+//! komentarza. Liczba 25–35 mA też nie miała źródła w żadnym dokumencie: pochodziła
+//! z progu diagnostycznego w naszej własnej tabeli oczekiwań.
+//!
+//! Gasimy ten bit mimo to i nadal jako pierwszą transakcję I²C bootu — stan nieokreślony
+//! trzeba rozstrzygnąć, a to jedyny moment, w którym da się to zrobić przed resztą startu.
+//! Ile ta szyna realnie pobiera, pozostaje **niezmierzone**: [`Pca9535::lora_rail_state`]
+//! potwierdza wyłącznie naszą stronę, a napięcia za U7 urządzenie o sobie nie powie.
 //!
 //! Mapy rejestrów PCA9535 / PCA9555 / XL9555 są identyczne, więc sterownik epdiy
 //! działa na tej kostce bez zmian.
@@ -115,6 +122,31 @@ impl Pca9535 {
     pub fn button_pressed(&self) -> Result<bool> {
         let p1 = self.dev.read_u8(REG_INPUT_1)?;
         Ok(p1 & port1::BUTTON == 0)
+    }
+
+    /// Stan bitu `LORA_EN` widziany z trzech stron: co wystawiamy, jak pin jest
+    /// skonfigurowany i co na nim naprawdę jest.
+    ///
+    /// # Po co trzy rejestry, skoro piszemy do jednego
+    ///
+    /// Bo tylko razem odróżniają „gasimy" od „zgaszone". `OUTPUT` mówi, co chcemy
+    /// wystawić; `CONFIG` mówi, czy pin jest w ogóle wyjściem — jeśli nie, zawartość
+    /// `OUTPUT` niczego nie steruje; `INPUT` mówi, jaki poziom faktycznie panuje na
+    /// nóżce, więc rozbieżność z `OUTPUT` znaczy, że coś ciągnie linię wbrew nam.
+    ///
+    /// To jest jedyna część zagadki prądu snu, którą urządzenie potrafi rozstrzygnąć
+    /// o sobie samo. Czy szyna VCC3V3 za układem U7 rzeczywiście gaśnie, tego już nie
+    /// powie — `R21` jest szeregowy, a na wejściu `EN` nie ma ani podciągnięcia, ani
+    /// ściągnięcia. Na to trzeba woltomierza.
+    pub fn lora_rail_state(&self) -> Result<(bool, bool, bool)> {
+        let out = self.dev.read_u8(REG_OUTPUT_0)?;
+        let cfg = self.dev.read_u8(REG_CONFIG_0)?;
+        let inp = self.dev.read_u8(REG_INPUT_0)?;
+        Ok((
+            out & BIT_LORA_EN != 0,
+            cfg & BIT_LORA_EN == 0, // 0 = wyjście
+            inp & BIT_LORA_EN != 0,
+        ))
     }
 
     /// Surowe porty wejściowe — do logu diagnostycznego przy bring-upie.

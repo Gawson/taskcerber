@@ -197,6 +197,25 @@ pub fn hardware_config_report(hw: &Board, boot_count: u32, wakeup: &str, poprzed
         ),
     }
 
+    // --- szyna LoRa/GPS: czy nasza strona na pewno ją gasi ------------------
+    // Po obaleniu hipotezy o burzy wybudzeń to jest główny podejrzany o 23 mA
+    // statycznej podłogi snu — jedyna pozycja tego rzędu w całym budżecie.
+    match hw.expander.lora_rail_state() {
+        Ok((stan, jest_wyjsciem, na_nozce)) => {
+            if !jest_wyjsciem {
+                warn!("LORA_EN: pin NIE JEST wyjściem — nasz zapis niczego nie steruje");
+            } else if stan || na_nozce {
+                warn!(
+                    "LORA_EN: wystawiamy {}, na nóżce {} — szyna NIE jest gaszona",
+                    stan as u8, na_nozce as u8
+                );
+            } else {
+                info!("LORA_EN: wyjście, stan niski, na nóżce 0 — nasza strona gasi poprawnie");
+            }
+        }
+        Err(e) => warn!("LORA_EN: brak odczytu: {e:#}"),
+    }
+
     // --- ładowarka: czy sami nie wystawiamy 5 V na gniazdo ------------------
     // Pin OTG jest podciągnięty do VSYS przez R25 10K, więc boost BAT→VBUS blokuje
     // wyłącznie bit OTG_CONFIG w REG03. Producent kasuje go przy każdym starcie, my
