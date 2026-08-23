@@ -820,7 +820,15 @@ fn is_first_upcoming(model: &Model, event: &CalEvent) -> bool {
         .days
         .iter()
         .flat_map(|d| d.events.iter())
-        .find(|e| !e.is_past(model.now) && !e.is_now(model.now))
+        // `!e.all_day` MUSI być w predykacie `find`, a nie strażnikiem na wejściu
+        // funkcji. Strażnik zostawiłby `find` na wydarzeniu całodniowym, `ptr::eq`
+        // dałoby fałsz i plakietka zniknęłaby z CAŁEJ strony, a nie tylko z tego
+        // jednego wiersza.
+        //
+        // Powód samego wykluczenia: całodniowe zaczyna się o 00:00, więc `za_ile`
+        // zwraca „teraz" przez cały dzień i podbiera plakietkę realnemu spotkaniu.
+        // „Za ile" ma sens wyłącznie dla wydarzenia, które ma godzinę.
+        .find(|e| !e.all_day && !e.is_past(model.now) && !e.is_now(model.now))
         .map(|e| core::ptr::eq(e, event))
         .unwrap_or(false)
 }
@@ -2073,6 +2081,35 @@ mod tests {
             events: vec![urlop, swieto, ev("Standup", 14, 15), ev("Przegląd", 16, 17)],
         }];
         m
+    }
+
+    /// Plakietka „za X min" nie ma prawa siąść na wydarzeniu całodniowym.
+    ///
+    /// Całodniowe zaczyna się o 00:00, więc `za_ile` zwracało dla niego „teraz" przez
+    /// cały dzień — i podbierało plakietkę spotkaniu, które faktycznie było następne.
+    #[test]
+    fn plakietka_nie_trafia_na_calodniowe() {
+        let m = model_mieszany();
+        let wszystkie: Vec<&CalEvent> = m.days.iter().flat_map(|d| d.events.iter()).collect();
+
+        for e in &wszystkie {
+            if e.all_day {
+                assert!(
+                    !is_first_upcoming(&m, e),
+                    "plakietka siadła na całodniowym „{}”",
+                    e.title
+                );
+            }
+        }
+
+        // I musi trafić na to jedno, które naprawdę jest następne — inaczej poprawka
+        // wygasiłaby plakietkę na całej stronie zamiast przenieść ją gdzie trzeba.
+        let z_plakietka: Vec<&str> = wszystkie
+            .iter()
+            .filter(|e| is_first_upcoming(&m, e))
+            .map(|e| e.title.as_str())
+            .collect();
+        assert_eq!(z_plakietka, vec!["Standup"], "plakietka na złym wydarzeniu");
     }
 
     /// Kolumna czasu ma dla całodniowego ten sam rytm dwóch linii co dla godzinowego.
