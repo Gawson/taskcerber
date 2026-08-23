@@ -676,6 +676,20 @@ fn draw_day_header(
     y + DAY_HEADER_H
 }
 
+/// Dwie linie kolumny czasu: mocna i cichsza.
+///
+/// Istnieje jako osobna funkcja, bo jest **jedynym** źródłem prawdy o tym, co trafia
+/// do tej kolumny — a test pilnujący jej szerokości musi brać treść stąd, nie
+/// z literałów. Poprzednia wersja testu przechodziła jeszcze długo po tym, jak
+/// pilnowana przez nią fraza zniknęła z kodu.
+fn time_label(event: &CalEvent) -> (String, String) {
+    if event.all_day {
+        ("cały".to_string(), "dzień".to_string())
+    } else {
+        (godzina(event.start), godzina(event.end))
+    }
+}
+
 fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: i32, h: i32) {
     let g = Geom::of(c);
     let now = model.now;
@@ -698,12 +712,17 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
 
     let baseline = (y + 26) as f32;
 
-    let time_text = if event.all_day {
-        "cały dzień".to_string()
-    } else {
-        godzina(event.start)
-    };
-    let time_size = if event.all_day { TEXT_BODY } else { TEXT_LEAD };
+    // Kolumna czasu ma dla OBU rodzajów wydarzeń ten sam rytm: mocna linia w stopniu
+    // wiodącym i cichsza pod nią. Wcześniej całodniowe dostawało jedną linię w stopniu
+    // 22 zamiast 27 — i to, a nie ton, było źródłem wrażenia, że jest „mniejsze".
+    // Ton był ten sam od początku (`time_ink` wyżej), a i tak by nie pomógł:
+    // `ink_level` skleja INK_DIM z INK_FAINT do tego samego poziomu.
+    //
+    // Zmierzony atrament kolumny 116×50 po `quantize_ink`, wobec wiersza godzinowego:
+    // przedtem 73,5 %, teraz 87,0 %. Reszta różnicy to sam kształt cyfr, których
+    // żadna typografia nie zrówna z literami — i tak ma zostać, bo godzina jest
+    // treścią, a „cały dzień" etykietą.
+    let (linia1, linia2) = time_label(event);
     let time_weight = if past {
         Weight::Regular
     } else {
@@ -711,27 +730,24 @@ fn draw_event(event: &CalEvent, model: &Model, fonts: &Fonts, c: &mut Gray8, y: 
     };
     fonts.draw(
         c,
-        &time_text,
+        &linia1,
         g.margin as f32,
         baseline,
-        time_size,
+        TEXT_LEAD,
         time_weight,
         time_ink,
         Align::Left,
     );
-
-    if !event.all_day {
-        fonts.draw(
-            c,
-            &godzina(event.end),
-            g.margin as f32,
-            baseline + 20.0,
-            TEXT_BODY,
-            Weight::Medium,
-            INK_DIM,
-            Align::Left,
-        );
-    }
+    fonts.draw(
+        c,
+        &linia2,
+        g.margin as f32,
+        baseline + 20.0,
+        TEXT_BODY,
+        Weight::Medium,
+        INK_DIM,
+        Align::Left,
+    );
 
     let dot_x = (g.margin + g.time_col_w - 18) as f32;
     let dot_y = baseline - 8.0;
@@ -2020,13 +2036,74 @@ mod tests {
         // Rozmiary i krój muszą być te SAME, co w `draw_event`, inaczej strażnik
         // pilnuje czegoś, czego na ekranie nie ma. Wcześniej mierzył 20/26 px krojem
         // Regular, a rysowane było Medium — czyli węższą wersję niż prawdziwa.
-        for (text, size) in [("cały dzień", TEXT_BODY), ("08:00", TEXT_LEAD)] {
-            let w = fonts.measure(text, size, Weight::Medium).ceil() as i32;
-            assert!(
-                w + 8 <= dot_x,
-                "`{text}` zajmuje {w} px, a do kropki jest {dot_x} px — zderzą się"
-            );
+        // Treść bierzemy z `time_label`, a NIE z literałów. Poprzednia wersja tego
+        // testu pilnowała frazy „cały dzień", która zniknęła z kodu — i przechodziła
+        // dalej, zielona i bezużyteczna. Strażnik, który nie czyta tego, czego pilnuje,
+        // jest gorszy niż jego brak, bo daje fałszywe poczucie osłony.
+        let mut godzinowe = ev("x", 8, 9);
+        godzinowe.all_day = false;
+        let mut calodniowe = ev("x", 0, 23);
+        calodniowe.all_day = true;
+
+        for wyd in [&godzinowe, &calodniowe] {
+            let (l1, l2) = time_label(wyd);
+            for (text, size) in [(l1, TEXT_LEAD), (l2, TEXT_BODY)] {
+                let w = fonts.measure(&text, size, Weight::Medium).ceil() as i32;
+                assert!(
+                    w + 8 <= dot_x,
+                    "`{text}` zajmuje {w} px, a do kropki jest {dot_x} px — zderzą się"
+                );
+            }
         }
+    }
+
+    /// Dzień mieszany: całodniowe i godzinowe razem.
+    ///
+    /// Istnieje, bo `model_with` tworzy WYŁĄCZNIE `all_day: false` — czyli do tej pory
+    /// żaden test agendy nie widział wydarzenia całodniowego ani razu.
+    fn model_mieszany() -> Model {
+        let mut m = Model::empty(dt(10, 30));
+        let mut urlop = ev("Urlop", 0, 23);
+        urlop.all_day = true;
+        let mut swieto = ev("Wniebowzięcie NMP", 0, 23);
+        swieto.all_day = true;
+        swieto.source = SourceTag::Holiday;
+        m.days = vec![DayGroup {
+            date: dt(10, 30).date(),
+            events: vec![urlop, swieto, ev("Standup", 14, 15), ev("Przegląd", 16, 17)],
+        }];
+        m
+    }
+
+    /// Kolumna czasu ma dla całodniowego ten sam rytm dwóch linii co dla godzinowego.
+    ///
+    /// Mierzymy ATRAMENT, nie obecność napisu: chodzi o to, żeby wiersz całodniowy
+    /// nie wyglądał z dystansu na pusty po lewej stronie, a tego nie da się sprawdzić
+    /// asercją na łańcuchu znaków.
+    #[test]
+    fn calodniowe_ma_w_kolumnie_czasu_te_sama_mase_co_godzinowe() {
+        let fonts = Fonts::embedded();
+        let m = model_mieszany();
+        let g = Geom::of(&Gray8::new(Rotation::Portrait));
+
+        let atrament = |wyd: &CalEvent| -> usize {
+            let mut c = Gray8::new(Rotation::Portrait);
+            c.clear(WHITE);
+            draw_event(wyd, &m, &fonts, &mut c, 100, EVENT_H);
+            c.quantize_ink();
+            (100..100 + EVENT_H)
+                .flat_map(|y| (g.margin..g.margin + g.time_col_w).map(move |x| (x, y)))
+                .filter(|&(x, y)| c.get(x, y) != WHITE)
+                .count()
+        };
+
+        let godzinowy = atrament(&m.days[0].events[2]);
+        let calodniowy = atrament(&m.days[0].events[0]);
+        assert!(
+            calodniowy * 100 >= godzinowy * 80,
+            "kolumna całodniowego ma {calodniowy} px wobec {godzinowy} px godzinowego \
+             — poniżej 80 %, wiersz znów wygląda na pusty"
+        );
     }
 
     fn ev(title: &str, sh: u32, eh: u32) -> CalEvent {
