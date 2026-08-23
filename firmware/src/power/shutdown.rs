@@ -302,18 +302,36 @@ pub fn enable_wakeup(keep_touch_alive: bool) -> Result<()> {
     let mut mask = 1u64 << BOOT_BTN;
 
     if keep_touch_alive {
-        // Podciągnięcie, zanim cokolwiek odczytamy. Bez niego `T_INT` bywa pinem
-        // pływającym — gdy w tym cyklu nie otwierało się okno dotyku, kontroler nie
-        // dostał sekwencji resetu i niczego nie steruje. Pływający pin z maską
-        // `ANY_LOW` to generator losowych wybudzeń. Podciągnięcie nie maskuje przy tym
-        // przypadku, przed którym się bronimy: kontroler trzymający `INT` w dole
-        // w spoczynku przeciąga słabe podciągnięcie i nadal odczytamy zero.
-        // SAFETY: numer pinu stały, wywołania bezstanowe.
+        // Podciągnięcie musi być RTC-owe, a NIE cyfrowe. To jest cała różnica między
+        // działającym wybudzaniem a generatorem losowych wybudzeń.
+        //
+        // `gpio_set_pull_mode` pisze do IO_MUX, czyli do ścieżki CYFROWEJ. Tymczasem
+        // `esp_sleep_enable_ext1_wakeup_io` przy zasypianiu woła `rtcio_hal_function_select`
+        // i przełącza pad na funkcję RTC — od tej chwili podciągnięcie z IO_MUX
+        // przestaje obowiązywać, bo pad słucha rejestrów RTC_IO.
+        //
+        // Poprzednia wersja robiła więc rzecz gorszą niż nic: próbkowała pin przy
+        // ŻYWYM podciągnięciu cyfrowym (odczyt: stan wysoki), uzbrajała maskę ANY_LOW,
+        // po czym szła spać, zostawiając pin PŁYWAJĄCY z uzbrojonym wybudzeniem na
+        // stan niski. Strażnik `idle_high` nigdy nie miał szansy zadziałać — mierzył
+        // podciągnięcie, które za chwilę znikało. To jest podejrzany numer jeden
+        // w sprawie 24 mA średniego poboru zmierzonych 2026-08-23.
+        //
+        // SAFETY: numer pinu stały, w domenie RTC, wywołania bezstanowe.
         let idle_high = unsafe {
             sys::gpio_set_direction(TOUCH_INT, sys::gpio_mode_t_GPIO_MODE_INPUT);
             sys::gpio_set_pull_mode(TOUCH_INT, sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY);
+
+            // Podciągnięcie w domenie RTC — to ono przeżyje przełączenie muxa i cały
+            // sen. `rtc_gpio_init` jest konieczne, bo bez niego rejestry RTC_IO tego
+            // pinu nie są jeszcze aktywne.
+            sys::rtc_gpio_init(TOUCH_INT);
+            sys::rtc_gpio_set_direction(TOUCH_INT, sys::rtc_gpio_mode_t_RTC_GPIO_MODE_INPUT_ONLY);
+            sys::rtc_gpio_pulldown_dis(TOUCH_INT);
+            sys::rtc_gpio_pullup_en(TOUCH_INT);
+
             std::thread::sleep(std::time::Duration::from_millis(2));
-            sys::gpio_get_level(TOUCH_INT) != 0
+            sys::rtc_gpio_get_level(TOUCH_INT) != 0
         };
         if idle_high {
             mask |= 1 << TOUCH_INT;
@@ -326,6 +344,18 @@ pub fn enable_wakeup(keep_touch_alive: bool) -> Result<()> {
         }
     } else {
         info!("budzenie: sam BOOT");
+    }
+
+    // `BOOT_BTN` ma na płytce podciągnięcie zewnętrzne, więc nie pływa — ale
+    // podciągnięcie RTC nic nie kosztuje przy wciśniętym przycisku (zwiera do masy
+    // przez własny rezystor), a broni przed tą samą klasą pomyłki, gdyby kiedyś
+    // ktoś zmienił płytkę albo pin.
+    // SAFETY: pin stały, w domenie RTC.
+    unsafe {
+        sys::rtc_gpio_init(BOOT_BTN);
+        sys::rtc_gpio_set_direction(BOOT_BTN, sys::rtc_gpio_mode_t_RTC_GPIO_MODE_INPUT_ONLY);
+        sys::rtc_gpio_pulldown_dis(BOOT_BTN);
+        sys::rtc_gpio_pullup_en(BOOT_BTN);
     }
 
     // SAFETY: maska dotyczy istniejących pinów zdolnych do RTC.

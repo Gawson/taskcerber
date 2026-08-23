@@ -58,6 +58,24 @@ pub const RST: i32 = 9;
 pub const INT: i32 = 3;
 
 /// Identyfikator produktu, cztery bajty ASCII: `911\0`.
+/// Początek tablicy konfiguracji; pod tym adresem siedzi jej WERSJA.
+const REG_CONFIG: u16 = 0x8047;
+/// `Module_Switch1` — bity 1:0 to tryb zgłaszania przerwania.
+const REG_INT_MODE: u16 = 0x804D;
+/// Suma kontrolna tablicy konfiguracji.
+const REG_CONFIG_CHECKSUM: u16 = 0x80FF;
+/// Zapis `1` tutaj każe kontrolerowi przyjąć nową konfigurację.
+const REG_CONFIG_FRESH: u16 = 0x8100;
+/// Ile bajtów obejmuje suma kontrolna: od `REG_CONFIG` do `REG_CONFIG_CHECKSUM - 1`.
+const CONFIG_LEN: usize = (REG_CONFIG_CHECKSUM - REG_CONFIG) as usize;
+
+/// Tryb przerwania: poziom niski utrzymany, dopóki palec dotyka.
+///
+/// Nie zbocze. Maska wybudzenia `ext1` próbkuje poziom przy zasypianiu i budzi na
+/// stanie niskim — krótki impuls zboczowy potrafi się w to okno nie trafić, poziom
+/// utrzymany trafia zawsze. Tę samą wartość ustawia firmware producenta.
+const INT_MODE_LOW_LEVEL: u8 = 0b10;
+
 const REG_PRODUCT_ID: u16 = 0x8140;
 /// Stan bufora: bit 7 = są nowe dane, bity 0-3 = liczba punktów.
 const REG_STATUS: u16 = 0x814E;
@@ -268,6 +286,70 @@ impl Gt911 {
 }
 
 impl Gt911 {
+    /// Ustawia zgłaszanie przerwania na „poziom niski, dopóki trwa dotyk".
+    ///
+    /// # Po co, skoro nagłówek tego pliku mówi, żeby konfiguracji nie ruszać
+    ///
+    /// Bo bez tego **wybudzanie dotykiem nie może działać** i nie działało: maska
+    /// `ext1` czeka na stan niski na `T_INT`, a kontroler nikt nie poprosił, żeby ten
+    /// stan kiedykolwiek wystawił. Płaciliśmy więc za trzymanie kontrolera przy życiu
+    /// przez cały sen i nie dostawaliśmy z tego nic.
+    ///
+    /// # Dlaczego to jest bezpieczniejsze, niż brzmi
+    ///
+    /// **Nie ruszamy wersji konfiguracji** pod `REG_CONFIG`. Kontroler zapisuje
+    /// tablicę do swojej pamięci trwałej tylko wtedy, gdy podana wersja jest wyższa
+    /// od bieżącej; przy tej samej wersji zmiana żyje w RAM-ie i znika przy resecie.
+    /// A my resetujemy kontroler przy KAŻDYM wybudzeniu ([`reset_sequence`]), więc:
+    /// zły zapis kasuje się sam w następnym cyklu, a dobry trzeba odtwarzać za każdym
+    /// razem. Oba wnioski prowadzą do tego samego: wołać to po każdym resecie.
+    ///
+    /// Sumę kontrolną liczymy z tablicy PRZECZYTANEJ z kontrolera, nie z własnej —
+    /// dzięki temu nie musimy znać poprawnej zawartości ani jednego innego bajtu.
+    ///
+    /// Błąd na dowolnym kroku jest logowany i **nie przerywa niczego**: dotyk działa
+    /// wtedy dalej przez odpytywanie w oknie interaktywnym, tak jak do tej pory.
+    pub fn set_interrupt_low_level(&self) -> Result<bool> {
+        let mut cfg = [0u8; CONFIG_LEN];
+        self.read_at(REG_CONFIG, &mut cfg)?;
+
+        let idx = (REG_INT_MODE - REG_CONFIG) as usize;
+        if cfg[idx] & 0b11 == INT_MODE_LOW_LEVEL {
+            info!("GT911: tryb przerwania już poprawny (poziom niski)");
+            return Ok(false);
+        }
+
+        let stary = cfg[idx];
+        cfg[idx] = (cfg[idx] & !0b11) | INT_MODE_LOW_LEVEL;
+
+        // Suma kontrolna GT911: dopełnienie do dwóch z sumy bajtów tablicy.
+        let suma = cfg.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        let checksum = (!suma).wrapping_add(1);
+
+        self.write_at(REG_INT_MODE, cfg[idx])?;
+        self.write_at(REG_CONFIG_CHECKSUM, checksum)?;
+        self.write_at(REG_CONFIG_FRESH, 1)?;
+
+        // Odczyt kontrolny. Bez niego nie wiedzielibyśmy, czy kontroler przyjął
+        // zapis, czy odrzucił go na sumie — a to jest różnica między działającym
+        // wybudzaniem a cichą regresją, którą widać dopiero po dobie na baterii.
+        let mut sprawdzenie = [0u8; 1];
+        self.read_at(REG_INT_MODE, &mut sprawdzenie)?;
+        if sprawdzenie[0] & 0b11 != INT_MODE_LOW_LEVEL {
+            bail!(
+                "GT911: zapis trybu przerwania odrzucony (0x804D = {:#04X}, chciałem {:#04X})",
+                sprawdzenie[0],
+                cfg[idx]
+            );
+        }
+
+        info!(
+            "GT911: tryb przerwania {stary:#04X} -> {:#04X} (poziom niski), suma {checksum:#04X}",
+            cfg[idx]
+        );
+        Ok(true)
+    }
+
     fn read_at(&self, reg: u16, buf: &mut [u8]) -> Result<()> {
         let addr = reg.to_be_bytes();
         self.dev.write_read(&addr, buf)
@@ -384,6 +466,20 @@ pub fn open(bus: &I2cBus, verbose: bool) -> Option<Gt911> {
                     }
                 );
             }
+
+            // Tryb przerwania ustawiamy przy KAŻDYM otwarciu, bo `reset_sequence`
+            // przy każdym wybudzeniu przywraca konfigurację z pamięci trwałej
+            // kontrolera — a my celowo do niej nie piszemy. Bez tego wywołania
+            // `T_INT` nigdy nie schodzi w dół i maska `ext1` czeka na sygnał,
+            // którego nikt nie wystawia.
+            match touch.set_interrupt_low_level() {
+                Ok(_) => {}
+                Err(e) => warn!(
+                    "GT911: nie ustawiłem trybu przerwania — dotyk będzie działał \
+                     tylko przez odpytywanie, nie wybudzi ze snu: {e:#}"
+                ),
+            }
+
             Some(touch)
         }
         Err(e) => {
