@@ -209,7 +209,6 @@ fn run(mut state: RtcState) -> Result<u64> {
     let temperature = hw.fuel.temperature_or_default();
 
     // Zamiennik miernika: licznik kulombów BQ27220 uśredniony od linii bazowej.
-    diag::energy_line(&mut state, power_status, fuel, net::time::now_unix());
 
     let mut policy = Policy::default();
     if let Some(interval) = config.interval_s {
@@ -645,7 +644,7 @@ fn run(mut state: RtcState) -> Result<u64> {
         // o prąd snu, a nie stanu sprzed dwudziestu sekund. Drukujemy tutaj także
         // dlatego, że USB-CDC gubi wszystko sprzed ~500 ms od wybudzenia, czyli
         // dokładnie ten fragment cyklu, w którym raport stał wcześniej.
-        diag::hardware_config_report(&hw);
+        diag::hardware_config_report(&hw, state.boot_count, &format!("{wakeup:?}"));
         shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
         if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
             warn!("nie mogę włączyć budzenia: {e:#}");
@@ -779,11 +778,17 @@ fn run(mut state: RtcState) -> Result<u64> {
         power::align_to_minute(now, base.saturating_mul(state.backoff_multiplier()))
     };
 
+    // Bilans energii liczymy tuż przed snem, a nie na starcie cyklu — z tego samego
+    // powodu co raport konfiguracji: konsola USB-CDC gubi wszystko sprzed enumeracji
+    // hosta, więc linia wypisana w pierwszych milisekundach jest nie do odczytania.
+    // Musi jednak wyprzedzać `state.store()`, bo aktualizuje linię bazową pomiaru.
+    diag::energy_line(&mut state, power_status, fuel, net::time::now_unix());
+
     state.last_known_unix = net::time::now_unix();
     state.store();
 
     // Jak wyżej: stan tuż przed snem, już po enumeracji USB.
-    diag::hardware_config_report(&hw);
+    diag::hardware_config_report(&hw, state.boot_count, &format!("{wakeup:?}"));
     shutdown::prepare_for_deep_sleep(&mut epd, &hw, WAKE_ON_TOUCH);
     if let Err(e) = shutdown::enable_wakeup(WAKE_ON_TOUCH) {
         warn!("nie mogę włączyć budzenia: {e:#}");

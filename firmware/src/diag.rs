@@ -173,7 +173,21 @@ fn psram_size() -> usize {
 /// zanim host zdąży się podpiąć. Odczyty trafiały więc w próżnię dokładnie wtedy, gdy
 /// były potrzebne. Pięć rejestrów kosztuje ułamek milisekundy, więc na kablu wołamy to
 /// przy każdym wybudzeniu; na baterii zostaje przy zimnym starcie.
-pub fn hardware_config_report(hw: &Board) {
+pub fn hardware_config_report(hw: &Board, boot_count: u32, wakeup: &str) {
+    // --- ile razy urządzenie wstało i od czego -----------------------------
+    //
+    // Ta linia jest tu, a nie przy starcie cyklu, z jednego twardego powodu:
+    // **konsola USB-CDC gubi wszystko sprzed enumeracji hosta**, a linia startowa
+    // pada w kilkusetnej milisekundzie. Sześć prób złapania jej na żywo skończyło
+    // się najwcześniejszym odczytem I(527) — czyli już po niej. Diagnostyka, której
+    // nie da się odczytać, nie jest diagnostyką.
+    //
+    // Licznik przeżywa deep sleep (siedzi w pamięci RTC), ale NIE przeżywa restartu
+    // programowego ani wgrania obrazu. Po dobie na baterii przy godzinnym śnie
+    // powinien wynosić około dwudziestu. Kilkaset albo kilka tysięcy znaczy burzę
+    // wybudzeń — i to jest jedyna liczba, która odróżnia ją od wysokiej podłogi snu.
+    info!("licznik: boot #{boot_count}, to wybudzenie: {wakeup}");
+
     // --- ładowarka: czy sami nie wystawiamy 5 V na gniazdo ------------------
     // Pin OTG jest podciągnięty do VSYS przez R25 10K, więc boost BAT→VBUS blokuje
     // wyłącznie bit OTG_CONFIG w REG03. Producent kasuje go przy każdym starcie, my
