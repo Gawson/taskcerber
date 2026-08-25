@@ -569,6 +569,25 @@ impl Epd {
     /// [`Epd::flush`] wyszło ścieżką błędu.
     pub fn ensure_powered_off(&mut self) {
         self.power_hold = false;
-        self.power_off();
+
+        // BEZWARUNKOWO, a nie przez `power_off()` — i to jest cała różnica.
+        //
+        // `power_off` jest strzeżone przez `if self.powered`, a ta flaga opisuje
+        // wyłącznie NASZE wywołania `power_on`. Tymczasem `epd_init_with_config`
+        // potrafi zostawić szyny podniesione, mimo że flaga mówi „zgaszone".
+        //
+        // Dopóki każdy cykl malował klatkę, flaga była prawdziwa i wszystko działało.
+        // Odkąd cykl bez zmian nie maluje nic, `ensure_powered_off` stało się pustą
+        // operacją i urządzenie szło spać z podniesionym wysokim napięciem panelu —
+        // pobór rzędu setek miliamperów przez CAŁY sen. Złapało to ostrzeżenie
+        // „SZYNA EPD STOI" w `power::shutdown`, w trzech cyklach na trzy.
+        //
+        // Słowo „ensure" ma znaczyć „upewnij się", a nie „wyłącz, jeśli sam wcześniej
+        // włączyłeś". Powtórne `epd_poweroff` przy już zgaszonych szynach jest
+        // nieszkodliwe: to zapis bitów do ekspandera po I²C, nie rozmowa z TPS-em.
+        //
+        // SAFETY: epdiy zainicjalizowane w `Epd::new`.
+        unsafe { sys::epd_poweroff() };
+        self.powered = false;
     }
 }
