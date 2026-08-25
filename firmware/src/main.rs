@@ -2518,18 +2518,22 @@ fn show_bring_up_card(epd: &mut Epd, temperature_c: i32, rotation: Rotation) {
     epd.ensure_powered_off();
 }
 
-/// Czy rysować znacznik zasypiania.
+/// Czy rysować znacznik zasypiania. **Rzecz na czas dewelopmentu.**
 ///
-/// Był rzeczą na czas bring-upu: bez niego nie dało się odróżnić „urządzenie mnie
-/// ignoruje" od „urządzenie śpi", bo e-papier trzyma obraz tak samo w obu wypadkach.
+/// Bez niego nie da się odróżnić „urządzenie mnie ignoruje" od „urządzenie śpi",
+/// bo e-papier trzyma obraz tak samo w obu wypadkach.
 ///
-/// Wyłączony, odkąd wybudzanie dotykiem działa — bo ta niejednoznaczność rozstrzyga
-/// się teraz dotknięciem szkła, a znacznik zaczął przeszkadzać. Rysuje się częściowym
-/// odświeżeniem tuż przed snem, więc zostawał na szkle przez cały sen; a po wybudzeniu
-/// dotykiem, które celowo NIE przemalowuje panelu, nie było jak go sprzątnąć: bufor
-/// odniesienia epdiy nie przeżywa deep sleepu, więc różnica dla tego prostokąta
-/// wychodziła pusta i kwadracik zostawał.
-const SLEEP_MARKER: bool = false;
+/// # Znacznik przeżywa wybudzenie i to jest przyjęte świadomie
+///
+/// Rysuje się częściowym odświeżeniem tuż przed snem, więc stoi na szkle przez cały
+/// sen. Po wybudzeniu, które celowo NIE przemalowuje panelu, nie ma jak go sprzątnąć:
+/// bufor odniesienia epdiy nie przeżywa deep sleepu, więc różnica dla tego prostokąta
+/// wychodzi pusta i kwadracik zostaje — aż do pierwszego prawdziwego przemalowania.
+///
+/// Kwadracik chwilę po wybudzeniu kłamie więc o stanie urządzenia. To znacznie tańsza
+/// cena niż pełna klatka co wybudzenie: **znacznik NIE MOŻE być powodem odrysowania
+/// całości.** Gdy przestanie być potrzebny, wystarczy tu `false`.
+const SLEEP_MARKER: bool = true;
 
 /// Bok kwadracika i jego odstęp od krawędzi płótna.
 const SLEEP_MARKER_SIZE: i32 = 22;
