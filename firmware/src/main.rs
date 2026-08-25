@@ -306,8 +306,11 @@ fn run(mut state: RtcState) -> Result<u64> {
     // z TPS65185 i ekspanderem jest bezpieczne. Gdyby to jednak destabilizowało
     // krok sieciowy, dowód będzie w logu: `krok5: pobieram ... DRAM {} KB`.
     let reader = if interact {
-        board::gt911::open(&bus, boot_count <= 1)
-            .and_then(|touch| TouchReader::spawn(touch).map_err(|e| warn!("{e:#}")).ok())
+        board::gt911::open(&bus, boot_count <= 1).and_then(|touch| {
+            TouchReader::spawn(touch, matches!(wakeup, shutdown::Wakeup::Touch))
+                .map_err(|e| warn!("{e:#}"))
+                .ok()
+        })
     } else {
         // Cykl bez okna dotyku też musi OTWORZYĆ kontroler, jeśli dotyk ma budzić ze
         // snu — i to nie po to, żeby czytać dotknięcia, tylko żeby odtworzyć tryb
@@ -449,7 +452,6 @@ fn run(mut state: RtcState) -> Result<u64> {
     // z polem stanu byłoby wtedy porównaniem wartości z samą sobą.
     let painted_crc = state.last_content_crc;
     let mut content_crc = state.last_content_crc;
-    let mut fetched = false;
 
     // OTA sprawdzamy TYLKO na kablu albo na wyraźne życzenie.
     //
@@ -556,7 +558,6 @@ fn run(mut state: RtcState) -> Result<u64> {
                     info!("kanał bez zmian — zostaję przy migawce");
                 } else {
                     events = out.events;
-                    fetched = true;
 
                     // Zapis PRZED `record_success`, bo ta funkcja nadpisuje
                     // `last_content_crc` — a to z nim porównujemy, żeby nie zapisywać
@@ -637,7 +638,27 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Przeciw `state.last_content_crc` warunek był tożsamościowo fałszywy po każdym
     // udanym pobraniu, czyli panel nie odświeżał się już nigdy po pierwszym boocie,
     // a razem z nim nie otwierało się okno dotyku.
-    let content_changed = content_crc != painted_crc || !fetched;
+    // Czy TREŚĆ się zmieniła. Bez `|| !fetched`, które tu kiedyś było i czyniło ten
+    // warunek tożsamościowo prawdziwym: `fetched` jest prawdziwe wyłącznie po pobraniu
+    // ZMIENIONEGO kanału, więc pominięcie pobrania — czyli sytuacja normalna, odkąd
+    // liczy się świeżość — wymuszało pełne odświeżenie przy KAŻDYM wybudzeniu.
+    let content_changed = content_crc != painted_crc;
+
+    // Zmiana doby to jedyna rzecz, która zmienia OBRAZ bez zmiany TREŚCI: data
+    // w nagłówku, „dziś" i „jutro" w agendzie, cały ekran „Dzisiaj". Liczymy ją
+    // z `last_known_unix`, czyli z chwili poprzedniego zaśnięcia — bez nowego pola
+    // w pamięci RTC, a więc bez unieważniania licznika wybudzeń i linii bazowej
+    // pomiaru energii. To ten warunek sprawia, że wybudzenie o północy ma sens.
+    let doba_sie_zmienila = {
+        let teraz = net::time::now_unix();
+        match (
+            unix_to_local(teraz, home_tz),
+            unix_to_local(state.last_known_unix, home_tz),
+        ) {
+            (Some(a), Some(b)) if state.last_known_unix > 0 => a.date() != b.date(),
+            _ => false,
+        }
+    };
     // Wybudzenie przyciskiem zawsze rysuje. Ktoś nacisnął, więc czegoś od urządzenia
     // chce — a za chwilę może chcieć obrócić ekran, co bez świeżej klatki nie ma sensu.
     // Cykl diagnostyczny maluje ZAWSZE: jego jedynym produktem jest ten ekran.
@@ -652,9 +673,9 @@ fn run(mut state: RtcState) -> Result<u64> {
     // Wymuszają je nadal stany, które naprawdę wymagają uwagi.
     let needs_paint = diagnoza
         || content_changed
+        || doba_sie_zmienila
         || state.boot_count <= 1
-        || matches!(net_state, NetState::Offline | NetState::NeedsAuth)
-        || woke_by_button;
+        || matches!(net_state, NetState::Offline | NetState::NeedsAuth);
 
     // Dotyk NIE zależy od tego, czy akurat malujemy klatkę — zależność idzie
     // w drugą stronę: to dotknięcie powoduje przerysowanie. Mapa obszarów dotykowych
@@ -1582,7 +1603,20 @@ struct TouchReader {
 
 impl TouchReader {
     /// Zabiera kontroler na własność i uruchamia wątek.
-    fn spawn(touch: board::gt911::Gt911) -> Result<Self> {
+    /// `palec_juz_lezy` mówi czytnikowi, że w chwili startu na szkle JEST palec —
+    /// ten, którym urządzenie zostało obudzone.
+    ///
+    /// Bez tego dotknięcie budzące bywało dodatkowo klikane, i to niedeterministycznie:
+    /// `FingerEdge` startował z `down: false`, więc jeśli palec leżał jeszcze, gdy wątek
+    /// ruszał (~700 ms po starcie), widział to jako NOWE naciśnięcie. Krótkie stuknięcie
+    /// zwykle nie zdążyło, dłuższe owszem — więc to samo dotknięcie raz przełączało
+    /// widok, a raz nie.
+    ///
+    /// Teraz jest jednoznacznie: **dotknięcie, które budzi, nigdy nie klika**. Żeby
+    /// cokolwiek wywołać, trzeba palec podnieść i dotknąć jeszcze raz. Przy ekranie
+    /// ściennym budzi się często „byle gdzie", a przypadkowe przełączenie widoku albo
+    /// wejście w konfigurację jest znacznie gorsze niż jedno stuknięcie więcej.
+    fn spawn(touch: board::gt911::Gt911, palec_juz_lezy: bool) -> Result<Self> {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};
 
@@ -1593,7 +1627,9 @@ impl TouchReader {
         let join = std::thread::Builder::new()
             .stack_size(4096)
             .spawn(move || {
-                let mut finger = FingerEdge::default();
+                let mut finger = FingerEdge {
+                    down: palec_juz_lezy,
+                };
                 let mut errors = 0u8;
                 while !flag.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(TOUCH_POLL_MS));
@@ -2482,10 +2518,18 @@ fn show_bring_up_card(epd: &mut Epd, temperature_c: i32, rotation: Rotation) {
     epd.ensure_powered_off();
 }
 
-/// Czy rysować znacznik zasypiania. Rzecz na czas bring-upu: bez niego nie da się
-/// odróżnić „urządzenie mnie ignoruje" od „urządzenie śpi", bo e-papier trzyma obraz
-/// tak samo w obu wypadkach — a śpi prawie zawsze.
-const SLEEP_MARKER: bool = true;
+/// Czy rysować znacznik zasypiania.
+///
+/// Był rzeczą na czas bring-upu: bez niego nie dało się odróżnić „urządzenie mnie
+/// ignoruje" od „urządzenie śpi", bo e-papier trzyma obraz tak samo w obu wypadkach.
+///
+/// Wyłączony, odkąd wybudzanie dotykiem działa — bo ta niejednoznaczność rozstrzyga
+/// się teraz dotknięciem szkła, a znacznik zaczął przeszkadzać. Rysuje się częściowym
+/// odświeżeniem tuż przed snem, więc zostawał na szkle przez cały sen; a po wybudzeniu
+/// dotykiem, które celowo NIE przemalowuje panelu, nie było jak go sprzątnąć: bufor
+/// odniesienia epdiy nie przeżywa deep sleepu, więc różnica dla tego prostokąta
+/// wychodziła pusta i kwadracik zostawał.
+const SLEEP_MARKER: bool = false;
 
 /// Bok kwadracika i jego odstęp od krawędzi płótna.
 const SLEEP_MARKER_SIZE: i32 = 22;
