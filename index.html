@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>T5 S3 Pro — kalendarz na e-papierze</title>
+    <!--
+      esp-web-tools 10.4.0 leży w repozytorium (web/vendor/), nie na CDN-ie. To jest
+      strona, która wgrywa firmware do urządzenia — nie ma powodu, żeby w momencie
+      flashowania ściągać kod z cudzego hosta. Efekt uboczny jest praktyczny:
+      działa bez internetu, z serwera w sieci lokalnej.
+
+      Aktualizacja: `npm pack esp-web-tools@X.Y.Z`, a potem zawartość
+      `package/dist/web/` do `web/vendor/esp-web-tools/`. Bundle jest code-splitowany
+      — sam install-button.js nie wystarczy, potrzebne są wszystkie chunki
+      (esp32s3-*.js i stub_flasher_32s3-*.js dociągają się dynamicznie).
+    -->
+    <script type="module" src="./vendor/esp-web-tools/install-button.js"></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fbfbfa;
+        --fg: #1a1a18;
+        --muted: #6b6b66;
+        --line: #dededa;
+        --accent: #1a1a18;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #161614;
+          --fg: #f0efeb;
+          --muted: #9a9a94;
+          --line: #33322e;
+          --accent: #f0efeb;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { max-width: 46rem; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+      h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -0.02em; }
+      .lede { color: var(--muted); margin: 0 0 2.5rem; font-size: 1.05rem; }
+      h2 { font-size: 1.1rem; margin: 2.5rem 0 .75rem; letter-spacing: -0.01em; }
+      ol, ul { padding-left: 1.25rem; }
+      li { margin: .4rem 0; }
+      code {
+        background: color-mix(in srgb, var(--fg) 8%, transparent);
+        padding: .12em .4em;
+        border-radius: 4px;
+        font-size: .9em;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      .install {
+        margin: 2rem 0;
+        padding: 1.5rem;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--fg) 3%, transparent);
+      }
+      button[slot="activate"] {
+        font: inherit;
+        font-weight: 600;
+        padding: .7rem 1.4rem;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--bg);
+        cursor: pointer;
+      }
+      button[slot="activate"]:hover { opacity: .85; }
+      [slot="unsupported"], [slot="not-allowed"] { color: var(--muted); }
+      .note {
+        border-left: 3px solid var(--line);
+        padding-left: 1rem;
+        color: var(--muted);
+        font-size: .95rem;
+      }
+      footer {
+        margin-top: 4rem; padding-top: 1.5rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted); font-size: .9rem;
+      }
+      a { color: inherit; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Kalendarz na e-papierze</h1>
+      <p class="lede">
+        Firmware dla LilyGo T5 E-Paper S3 Pro. Wgrywa się prosto z przeglądarki —
+        bez instalowania czegokolwiek.
+      </p>
+
+      <div class="install">
+        <esp-web-install-button manifest="./manifest.json">
+          <button slot="activate">Zainstaluj firmware</button>
+          <span slot="unsupported">
+            Ta przeglądarka nie obsługuje Web Serial. Użyj Chrome, Edge albo Firefoksa 151+
+            na komputerze — na iOS i Androidzie to nie zadziała.
+          </span>
+          <span slot="not-allowed">
+            Web Serial wymaga bezpiecznego kontekstu: <code>https://</code> albo
+            <code>localhost</code>. Po zwykłym <code>http://</code> na adres IP
+            przeglądarka nie da dostępu do portu — patrz
+            <code>tools/serve-flasher.sh</code>.
+          </span>
+        </esp-web-install-button>
+      </div>
+
+      <h2>Jak to zrobić</h2>
+      <ol>
+        <li>Podłącz płytkę kablem <strong>USB-C</strong>. To natywne USB układu
+          (<code>303A:1001</code>) — żadne sterowniki nie są potrzebne.</li>
+        <li>Kliknij <strong>Zainstaluj firmware</strong> i wybierz port szeregowy z listy.</li>
+        <li>Poczekaj na koniec wgrywania. Panel wyczyści się i pokaże ekran konfiguracji.</li>
+        <li>Podaj dane WiFi i adres kalendarza — patrz niżej.</li>
+      </ol>
+
+      <p class="note">
+        Jeśli port nie pojawia się na liście: przytrzymaj <strong>BOOT</strong>,
+        kliknij <strong>RST</strong> z tyłu płytki, puść <strong>RST</strong>,
+        a potem puść <strong>BOOT</strong>. To ręczne wejście w tryb wgrywania.
+      </p>
+
+      <h2>Adres kalendarza</h2>
+      <p>
+        Urządzenie czyta kalendarz przez <strong>prywatny adres iCal</strong> — bez
+        logowania do Google i bez ekranu zgody. Znajdziesz go tak:
+      </p>
+      <ol>
+        <li>Kalendarz Google → <em>Ustawienia</em> → wybierz kalendarz z listy po lewej.</li>
+        <li>Zjedź do <em>Prywatny adres w formacie iCal</em>.</li>
+        <li>Skopiuj adres kończący się na <code>/basic.ics</code>.</li>
+      </ol>
+      <p class="note">
+        Ten adres to stały klucz do całego kalendarza — bez ograniczenia zakresu
+        i bez terminu ważności. Kto go ma, widzi wszystko. Trzymaj go tak jak hasło,
+        a jeśli wycieknie, zresetuj go w tym samym miejscu w ustawieniach.
+      </p>
+
+      <h2>Aktualizacje</h2>
+      <p>
+        Wróć na tę stronę i kliknij ponownie. Partycja z konfiguracją leży
+        <strong>za</strong> obszarem aplikacji, więc dane WiFi i adres kalendarza
+        przeżywają przegranie firmware'u.
+      </p>
+
+      <footer>
+        Kod źródłowy i dokumentacja sprzętu: patrz repozytorium projektu.
+        Sterownik e-papieru pochodzi z <a href="https://github.com/vroland/epdiy">epdiy</a>
+        (LGPL-3.0-or-later).
+      </footer>
+    </main>
+  </body>
+</html>

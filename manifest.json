@@ -1,0 +1,14 @@
+{
+  "name": "T5 S3 Pro Kalendarz",
+  "version": "0.1.0+gd5f688c",
+  "new_install_prompt_erase": true,
+  "new_install_improv_wait_time": 0,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
