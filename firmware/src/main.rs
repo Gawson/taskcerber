@@ -259,7 +259,29 @@ fn run(mut state: RtcState) -> Result<u64> {
     // naraz, a pisanie kroków na ekran w trakcie TLS-a powodowało dokładnie tę
     // awarię, którą miało pokazać. Pełne wyjaśnienie: nagłówek `devlogic::boot`.
     let okruszek = store.boot_crumb();
-    let diagnoza = okruszek.is_failure();
+
+    // Okruszek NIE jest awarią, gdy reset przyszedł z zewnątrz przez USB.
+    //
+    // `espflash` resetuje płytkę asynchronicznie wobec jej cyklu, więc wgranie obrazu
+    // w piętnastej sekundzie zostawia okruszek na kroku, który akurat trwał — najczęściej
+    // `RadioDown`, bo faza sieciowa jest najdłuższa. Następny boot meldował wtedy awarię,
+    // której nie było, POMIJAŁ SIEĆ i oddawał panel ekranowi diagnozy. Czyli każde
+    // wgranie w złym momencie kosztowało jeden zmarnowany cykl i mylącą diagnozę.
+    // Widoczne w logach jako „zamilkł na RadioDown" przy `powód: USBPeripheral`.
+    //
+    // Wykluczamy WYŁĄCZNIE reset z USB, i to celowo wąsko: `Brownout` (zapaść
+    // zasilania), `Panic`, `InterruptWdt` i `TaskWdt` to prawdziwe awarie i mają
+    // dalej zapalać diagnozę. Na urządzeniu użytkownika ta gałąź nie występuje
+    // w ogóle — nikt nie trzyma go podpiętego do programatora.
+    let reset_z_usb = matches!(ResetReason::get(), ResetReason::USBPeripheral);
+    let diagnoza = okruszek.is_failure() && !reset_z_usb;
+    if okruszek.is_failure() && reset_z_usb {
+        info!(
+            "okruszek mówi {:?}, ale reset przyszedł z USB — to wgranie obrazu w środku \
+             cyklu, nie awaria; nie pomijam sieci",
+            okruszek.step
+        );
+    }
     if diagnoza {
         warn!(
             "poprzedni cykl zamilkł na {:?} po {} ms, wolny DRAM {} KB — pomijam sieć",
