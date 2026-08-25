@@ -9,6 +9,18 @@
 //! Na tej magistrali wiszą: PCA9535 `0x20`, RTC `0x51`, BQ27220 `0x55`,
 //! GT911 `0x5D`, TPS65185 `0x68`, BQ25896 `0x6B`. TPS65185 i PCA9535 obsługuje
 //! epdiy; resztą zajmujemy się sami.
+//!
+//! # Podciągnięcia magistrali
+//!
+//! Płytka MA rezystory zewnętrzne — sprawdzone doświadczalnie 2026-08-26: obraz
+//! zbudowany z całkowicie wyłączonymi podciągnięciami wewnętrznymi znalazł wszystkie
+//! pięć układów na magistrali, bez jednego błędu transmisji. Wcześniej było to
+//! twierdzenie w komentarzu, bez źródła w żadnym dokumencie.
+//!
+//! Wewnętrzne zostawiamy mimo to włączone, jako siatkę bezpieczeństwa na wypadek
+//! magistrali zawieszonej resetem w środku transakcji. Równolegle do zewnętrznych
+//! są elektrycznie nieszkodliwe: ~45 kΩ obok kilku kiloomów praktycznie nie zmienia
+//! sumy, a nota ESP-IDF sama nazywa je zbyt słabymi, żeby coś zepsuć.
 
 use std::ptr;
 
@@ -54,6 +66,21 @@ impl I2cBus {
                 clk_source: sys::soc_periph_i2c_clk_src_t_I2C_CLK_SRC_DEFAULT,
             },
             glitch_ignore_cnt: 7,
+            // Podciągnięcia wewnętrzne deklarujemy TUTAJ, a nie dopisujemy po fakcie.
+            //
+            // Sterownik zapamiętuje tę flagę i przy KAŻDYM konfigurowaniu pinów robi
+            // z niej użytek (`i2c_common.c:338` i `:352`): gdy jest fałszywa, woła
+            // jawnie `gpio_pullup_dis()` na SDA i SCL. Poprzednia wersja włączała je
+            // własnym `gpio_set_pull_mode` PO utworzeniu magistrali — działało, ale
+            // każde ponowne skonfigurowanie pinów przez sterownik cicho by je zdjęło.
+            // Ta sama flaga wycisza ostrzeżenie „Please check pull-up resistances",
+            // które sterownik wypisuje dokładnie wtedy, gdy jest fałszywa
+            // (`i2c_master.c:1066`) — u nas na każdym boocie.
+            flags: {
+                let mut f = sys::i2c_master_bus_config_t__bindgen_ty_2::default();
+                f.set_enable_internal_pullup(1);
+                f
+            },
             intr_priority: 0,
             trans_queue_depth: 0, // 0 = tryb synchroniczny
             ..Default::default()
@@ -66,20 +93,7 @@ impl I2cBus {
             bail!("i2c_new_master_bus zwróciło {err}");
         }
 
-        let mut bus = Self { handle };
-        // Włącz podciągnięcia — na tej płytce rezystory są, ale wewnętrzne nie szkodzą
-        // i ratują sytuację, gdyby magistrala została zawieszona przez reset w trakcie
-        // transakcji.
-        bus.enable_internal_pullups();
-        Ok(bus)
-    }
-
-    fn enable_internal_pullups(&mut self) {
-        // SAFETY: numery pinów są stałe i poprawne dla tej płytki.
-        unsafe {
-            sys::gpio_set_pull_mode(SDA, sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY);
-            sys::gpio_set_pull_mode(SCL, sys::gpio_pull_mode_t_GPIO_PULLUP_ONLY);
-        }
+        Ok(Self { handle })
     }
 
     /// Surowy uchwyt do przekazania epdiy przez `EpdI2cConfig`.
